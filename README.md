@@ -6,7 +6,7 @@ Turn every YouTube video into a resource for deep learning. YouTube Digest bring
 
 - Turn captions into a readable, searchable learning resource.
 - Learn languages with the original transcript, a Simplified Chinese translation, or an aligned bilingual view.
-- Ask an AI chat questions about the video — it answers using the transcript and whatever you've written in your own notes.
+- Ask an AI chat questions about the video - it answers using the transcript and whatever you've written in your own notes.
 - Navigate long videos by clicking timestamps in the transcript, or in a quoted line inside your notes.
 - Keep one freeform notebook per video: write in Markdown, use quick formatting shortcuts, and pull in cited quotes from the video with a single keystroke.
 - Export your notebook as a Markdown file, or sync it straight to a Google Drive folder you choose.
@@ -20,19 +20,19 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 This is a personalized fork of [zarazhangrui/youtube-digest](https://github.com/zarazhangrui/youtube-digest), an open-source Chrome extension originally built around a transcript viewer, bilingual translation, and an AI-generated overview with separately captured note cards. It isn't affiliated with or endorsed by the original author, and upstream doesn't accept issues or pull requests for the changes made here.
 
-Everything described under "New in v2.0.0" below — the AI chat, the rebuilt Markdown notebook, and Google Drive/local export — was added in this fork and doesn't exist in the original project. Transcript viewing, bilingual translation, select-and-explain, and the DeepSeek/Supadata integration come from the upstream project this was built on.
+Everything described under "New in v2.0.0" below - the AI chat, the rebuilt Markdown notebook, and Google Drive/local export - was added in this fork and doesn't exist in the original project. Transcript viewing, bilingual translation, select-and-explain, and the DeepSeek/Supadata integration come from the upstream project this was built on.
 
 ## New in v2.0.0 (update the `version` field in `manifest.json` to match if you adopt this)
 
 The Notes tab and the Overview tab have both been rebuilt from scratch:
 
-- **Overview is now Chat.** Ask questions about the video in plain language. Answers are grounded in the transcript and, if you've written any, your own notes for that video — not a one-shot chapters-and-key-quotes summary. Chat history resets when you switch videos or close the panel; it isn't saved to disk.
+- **Overview is now Chat.** Ask questions about the video in plain language. Answers are grounded in the transcript and, if you've written any, your own notes for that video - not a one-shot chapters-and-key-quotes summary. Chat history resets when you switch videos or close the panel; it isn't saved to disk.
 - **Notes is now one freeform notebook per video**, replacing the old list of separately captured quote cards.
   - Markdown formatting shortcuts: **Ctrl+B** (bold), **Ctrl+I** (italic), **Ctrl+Shift+8** (bullet list).
-  - Press **Ctrl+Shift+Q** to insert a cited quote — `[MM:SS]` and the transcript line at the current playback position — at your cursor. Works whether the video is playing or paused.
+  - Press **Ctrl+Shift+Q** to insert a cited quote - `[MM:SS]` and the transcript line at the current playback position - at your cursor. Works whether the video is playing or paused.
   - Quote lines render in blue. **Ctrl/Cmd+Click** one to jump the video back to that exact moment.
   - Notes autosave as you type, and are flushed immediately when the panel closes.
-- **Export your notebook.** Click **Download** for an instant Markdown file, no setup required. Or click **Save to Drive** to sync it to a Google Drive folder you choose — this needs a short one-time setup; see [Set up Google Drive export](#set-up-google-drive-export-optional) below.
+- **Export your notebook.** Click **Download** for an instant Markdown file, no setup required. Or click **Save to Drive** to sync it to a Google Drive folder you choose - this needs a short one-time setup; see [Set up Google Drive export](#set-up-google-drive-export-optional) below.
 
 Search, the unified Original/中文/双语 setting across Transcript and Notes, and select-and-explain are unchanged from earlier versions.
 
@@ -67,7 +67,7 @@ If you prefer to do it yourself:
 7. Select the exact project folder you chose, which must contain `manifest.json`.
 8. Pin YouTube Digest from Chrome's Extensions menu if you want quick access.
 
-Because this is an unpacked extension, it does not update automatically. After downloading an update or changing local files, click **Reload** on the YouTube Digest card at `chrome://extensions`, **then refresh any open YouTube tabs** — reloading the extension does not update scripts already injected into tabs that were open beforehand (see [Troubleshooting](#buttons-stop-working-or-the-console-shows-cannot-read-properties-of-undefined-reading-sendmessage)). Moving or deleting the source folder breaks the unpacked extension until you load it again from the new location.
+Because this is an unpacked extension, it does not update automatically. After downloading an update or changing local files, click **Reload** on the YouTube Digest card at `chrome://extensions`, **then refresh any open YouTube tabs** - reloading the extension does not update scripts already injected into tabs that were open beforehand (see [Troubleshooting](#buttons-stop-working-or-the-console-shows-cannot-read-properties-of-undefined-reading-sendmessage)). Moving or deleting the source folder breaks the unpacked extension until you load it again from the new location.
 
 ## Set up your API keys
 
@@ -106,7 +106,7 @@ Base URL: https://api.deepseek.com
 Model: deepseek-v4-flash
 ```
 
-YouTube Digest sends every DeepSeek request in non-thinking mode for responsive, predictable interactions. The endpoint and model are fixed in Settings, so the only AI credential you enter is your DeepSeek API key. Chat sends the full transcript, your notebook content, and the growing conversation history on every turn, with no summarization or truncation — cost and latency both increase somewhat as a single conversation gets longer. To use another provider or model, copy the safe customization prompt in Settings and give it to a coding agent for your local copy. Never add an API key to that prompt or chat.
+YouTube Digest sends every DeepSeek request in non-thinking mode for responsive, predictable interactions. The endpoint and model are fixed in Settings, so the only AI credential you enter is your DeepSeek API key. Chat sends the full transcript, your notebook content, and the growing conversation history on every turn, with no summarization or truncation - cost and latency both increase somewhat as a single conversation gets longer. To use another provider or model, copy the safe customization prompt in Settings and give it to a coding agent for your local copy. Never add an API key to that prompt or chat.
 
 Keys and settings are stored in Chrome's local extension storage on your device. Release builds do not include or use `config.js`.
 
@@ -135,7 +135,7 @@ Add the printed string as a top-level `"key"` field in `manifest.json`:
 
 Two things commonly go wrong here:
 
-- Copying the base64 string by selecting it on screen in a terminal can accidentally capture an invisible line-ending character along with it, which silently corrupts the value and produces a `Value 'key' is missing or invalid` error when loading the extension. Pipe it straight to your clipboard instead — add `| pbcopy` on macOS to the second command above — and paste directly, without viewing it on screen first.
+- Copying the base64 string by selecting it on screen in a terminal can accidentally capture an invisible line-ending character along with it, which silently corrupts the value and produces a `Value 'key' is missing or invalid` error when loading the extension. Pipe it straight to your clipboard instead - add `| pbcopy` on macOS to the second command above - and paste directly, without viewing it on screen first.
 - Keep `key.pem` itself **outside** the extension's project folder. Chrome scans every file inside a loaded unpacked extension and warns if it finds a private key sitting there.
 
 Remove the extension from `chrome://extensions` and **Load unpacked** again (a plain reload doesn't fully re-derive the ID). Confirm the ID shown on its card stays identical across a couple of reloads and a full Chrome restart before moving on.
@@ -145,24 +145,24 @@ Remove the extension from `chrome://extensions` and **Load unpacked** again (a p
 1. Create a project at [console.cloud.google.com/projectcreate](https://console.cloud.google.com/projectcreate).
 2. **APIs & Services → OAuth consent screen → Get started.** App name and your email; User type: **External**. This starts the app in Testing mode, which needs no Google review for personal use.
 3. In the **Audience** tab, add your own Google account as a test user. Skipping this produces an access-blocked error the first time you try to export.
-4. In the **Data access** tab, add the scope `https://www.googleapis.com/auth/drive.file` — access limited to files and folders this extension creates itself, never your whole Drive.
+4. In the **Data access** tab, add the scope `https://www.googleapis.com/auth/drive.file` - access limited to files and folders this extension creates itself, never your whole Drive.
 5. **APIs & Services → Library** → enable the **Google Drive API**.
 6. **APIs & Services → Credentials** (labeled **Clients** in some versions of the console) → **Create Client** → Application type: **Chrome Extension** → paste the stable extension ID from step 1.
 7. Copy the resulting Client ID into the `oauth2.client_id` field in `manifest.json`, replacing the placeholder.
 8. Reload the extension in `chrome://extensions`, then refresh any open YouTube tabs.
 
-Because the app stays unverified — expected and fine for a personal project — Google may occasionally ask you to re-consent even after a successful first authorization, and authorizations expire after 7 days regardless. That's normal, not a bug.
+Because the app stays unverified - expected and fine for a personal project - Google may occasionally ask you to re-consent even after a successful first authorization, and authorizations expire after 7 days regardless. That's normal, not a bug.
 
 ### 3. Choose a destination folder
 
-`drive.file` only ever grants access to files and folders this extension created itself — it cannot browse your existing Drive structure, which is why there's no "pick any folder" browser here. Use **+ New folder** in the Notes tab to create and name a destination from inside the extension; it's remembered and offered again for future exports. A file that's deleted directly in Google Drive (even just moved to the trash) is replaced with a fresh one on the next save, rather than silently patched in place.
+`drive.file` only ever grants access to files and folders this extension created itself - it cannot browse your existing Drive structure, which is why there's no "pick any folder" browser here. Use **+ New folder** in the Notes tab to create and name a destination from inside the extension; it's remembered and offered again for future exports. A file that's deleted directly in Google Drive (even just moved to the trash) is replaced with a fresh one on the next save, rather than silently patched in place.
 
 ## Use YouTube Digest
 
 1. Open a standard YouTube watch page with captions.
 2. Click the YouTube Digest extension icon to open the side panel.
 3. Read the timestamped transcript, or choose **Original**, **中文**, or **双语**.
-4. Open **Chat** to ask questions about the video — answers draw on the transcript and, once you've written any, your own notes.
+4. Open **Chat** to ask questions about the video - answers draw on the transcript and, once you've written any, your own notes.
 5. Select transcript text when you want an AI explanation.
 6. Open **Notes** to keep a running notebook for the video: type freely, use Ctrl+B / Ctrl+I / Ctrl+Shift+8 to format, and press Ctrl+Shift+Q to drop in a cited quote from wherever the video currently is.
 7. Click **Download** to save the notebook as Markdown, or **Save to Drive** to sync it to your chosen Drive folder.
@@ -175,7 +175,7 @@ Because the app stays unverified — expected and fine for a personal project �
 - Original, Simplified Chinese, and aligned bilingual transcript views.
 - An AI chat grounded in the transcript and your notebook, selected-text explanations, and translation.
 - A freeform, Markdown notebook per video with formatting shortcuts, cited quotes with click-to-seek, and autosave.
-- Downloading your notebook as Markdown at any time, and optionally syncing it to a Google Drive folder of your choosing (`drive.file` scope only — see [Set up Google Drive export](#set-up-google-drive-export-optional)).
+- Downloading your notebook as Markdown at any time, and optionally syncing it to a Google Drive folder of your choosing (`drive.file` scope only - see [Set up Google Drive export](#set-up-google-drive-export-optional)).
 - A local cache for recent transcript results.
 - DeepSeek V4 Flash for all published AI features. Other providers require a local code adaptation and are not supported by this published version.
 
@@ -214,7 +214,7 @@ A measured 20-minute English talk used about **32,600 input tokens** and an esti
 - **Off-peak: $0.003 to $0.010 USD**.
 - **Peak: $0.005 to $0.020 USD**.
 
-The lower end assumes most repeated input hits DeepSeek's cache. The upper end assumes cache misses. Translation is lazy and cached, so translating only part of a video costs less. Chat costs scale differently — each question resends the full transcript, your notebook, and the conversation so far, so cost per turn grows as a conversation continues, unlike translation's small cached batches. Check the official page before relying on these prices.
+The lower end assumes most repeated input hits DeepSeek's cache. The upper end assumes cache misses. Translation is lazy and cached, so translating only part of a video costs less. Chat costs scale differently - each question resends the full transcript, your notebook, and the conversation so far, so cost per turn grows as a conversation continues, unlike translation's small cached batches. Check the official page before relying on these prices.
 
 ## Remix it with your coding agent
 
@@ -223,11 +223,11 @@ This is a personal remix project. Upstream issues and pull requests are not acce
 YouTube Digest uses plain HTML, CSS, and JavaScript with no build step, so it is a friendly starting point for agent-assisted projects. Ideas to try:
 
 - Add more translation languages and let each person choose a learning language.
-- Customize Chat's system prompt for different video genres — lectures, interviews, tutorials, reviews, research talks.
+- Customize Chat's system prompt for different video genres - lectures, interviews, tutorials, reviews, research talks.
 - Let Chat also read notebooks from other videos, for cross-video synthesis instead of one video at a time.
-- Add a rendered Markdown preview mode for the notebook — today's highlight overlay only recolors cited-quote lines, not full formatting.
-- Support the real Google Picker for browsing your existing Drive structure, instead of the current app-managed-folders-only approach. Worth knowing before attempting this: an earlier version of this project tried loading the Picker directly into the side panel and hit a hard wall — Manifest V3 does not permit any remotely-hosted script in an extension page's `script-src` under any configuration, so an embedded Picker cannot work this way. Google's "open in a real tab, handle a redirect back" pattern is the path that would actually work, and needs a differently-configured OAuth client than the one used for the rest of Drive export.
-- Export notes to more formats than Markdown — CSV, Anki, or another study tool.
+- Add a rendered Markdown preview mode for the notebook - today's highlight overlay only recolors cited-quote lines, not full formatting.
+- Support the real Google Picker for browsing your existing Drive structure, instead of the current app-managed-folders-only approach. Worth knowing before attempting this: an earlier version of this project tried loading the Picker directly into the side panel and hit a hard wall - Manifest V3 does not permit any remotely-hosted script in an extension page's `script-src` under any configuration, so an embedded Picker cannot work this way. Google's "open in a real tab, handle a redirect back" pattern is the path that would actually work, and needs a differently-configured OAuth client than the one used for the rest of Drive export.
+- Export notes to more formats than Markdown - CSV, Anki, or another study tool.
 - Add optional local-model support for a different privacy and cost tradeoff.
 - Improve accessibility with keyboard navigation, font controls, and higher-contrast themes.
 
@@ -240,12 +240,12 @@ If you want another AI provider or model, first open the exact YouTube Digest pr
 YouTube Digest makes provider requests directly from the extension:
 
 1. It sends a canonical YouTube watch URL to Supadata to request the native transcript.
-2. It sends the transcript — and your notebook's content, if you've written any — to DeepSeek when you use Chat, Explain, or translation.
+2. It sends the transcript - and your notebook's content, if you've written any - to DeepSeek when you use Chat, Explain, or translation.
 3. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
 4. If you set up Google Drive export, it can create and update files inside a Drive folder you designate, using a `drive.file` scope that cannot see or touch any other file in your Drive.
 5. It stores keys, settings, notebooks, and recent cache entries locally in Chrome.
 
-There is no YouTube Digest account system, advertising, analytics, or telemetry. Supadata, DeepSeek, and — if you set it up — Google Drive still receive data under their own terms and privacy policies. See [PRIVACY.md](PRIVACY.md) for details.
+There is no YouTube Digest account system, advertising, analytics, or telemetry. Supadata, DeepSeek, and - if you set it up - Google Drive still receive data under their own terms and privacy policies. See [PRIVACY.md](PRIVACY.md) for details.
 
 ## Troubleshooting
 
@@ -265,15 +265,15 @@ There is no YouTube Digest account system, advertising, analytics, or telemetry.
 
 ### Buttons stop working, or the console shows "Cannot read properties of undefined (reading 'sendMessage')"
 
-This means a YouTube tab is running an old, orphaned copy of the content script from before the extension was last reloaded — reloading the extension in `chrome://extensions` does not update scripts already injected into tabs that were open beforehand.
+This means a YouTube tab is running an old, orphaned copy of the content script from before the extension was last reloaded - reloading the extension in `chrome://extensions` does not update scripts already injected into tabs that were open beforehand.
 
 - Reload the extension in `chrome://extensions` first.
-- Then fully refresh the YouTube tab — or, more reliably, close it and open a fresh one to the same video.
+- Then fully refresh the YouTube tab - or, more reliably, close it and open a fresh one to the same video.
 - Test immediately, without reloading the extension again in between.
 
 ### "Value 'key' is missing or invalid" when loading unpacked
 
-The `key` field in `manifest.json` is missing, empty, or corrupted — usually from a base64 string that picked up a stray character during copying. Regenerate it following [Set up Google Drive export](#set-up-google-drive-export-optional) step 1, paste it in without viewing it on screen first, and verify with:
+The `key` field in `manifest.json` is missing, empty, or corrupted - usually from a base64 string that picked up a stray character during copying. Regenerate it following [Set up Google Drive export](#set-up-google-drive-export-optional) step 1, paste it in without viewing it on screen first, and verify with:
 
 ```bash
 python3 -c "import json, base64; k = json.load(open('manifest.json'))['key']; base64.b64decode(k, validate=True); print('ok')"
@@ -303,7 +303,7 @@ YouTube Digest will not fall back to generated transcription.
 ### Drive export doesn't work
 
 - Confirm you replaced the placeholder `client_id` in `manifest.json` with a real one from your own OAuth client, and reloaded the extension afterward.
-- Confirm the extension's ID shown at `chrome://extensions` matches the ID registered with the OAuth client — regenerating `key.pem` changes the ID, and the OAuth client needs re-registering against the new one if that happens.
+- Confirm the extension's ID shown at `chrome://extensions` matches the ID registered with the OAuth client - regenerating `key.pem` changes the ID, and the OAuth client needs re-registering against the new one if that happens.
 - Confirm your own Google account is listed as a test user on the OAuth consent screen.
 - Confirm the `drive.file` scope was actually added in the Data access tab, and that the Drive API is enabled in the Library.
 
@@ -319,8 +319,8 @@ npm run check
 npm run package
 ```
 
-The agent should also reload the unpacked extension in Chrome — remembering that a YouTube tab open from before the reload needs its own refresh too — and test several real YouTube videos. Automated checks do not prove that live provider requests and YouTube interactions work.
+The agent should also reload the unpacked extension in Chrome - remembering that a YouTube tab open from before the reload needs its own refresh too - and test several real YouTube videos. Automated checks do not prove that live provider requests and YouTube interactions work.
 
 ## License
 
-MIT. See [LICENSE](LICENSE). This is a fork of the original project credited in [About this project](#about-this-project), also MIT-licensed — check that `LICENSE` still carries its original copyright notice alongside any changes made here, which is standard practice for an MIT fork.
+MIT. See [LICENSE](LICENSE). This is a fork of the original project credited in [About this project](#about-this-project), also MIT-licensed - check that `LICENSE` still carries its original copyright notice alongside any changes made here, which is standard practice for an MIT fork.
