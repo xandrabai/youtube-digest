@@ -162,8 +162,8 @@ test("release copy documents current scope without em dashes", () => {
 
   assert.match(readme, /^## Remix it with your coding agent$/m);
   assert.match(readme, /more translation languages/i);
-  assert.match(readme, /customized summary templates/i);
-  assert.match(readme, /vocabulary notebook/i);
+  assert.match(readme, /Customize Chat's system prompt for different video genres/i);
+  assert.match(readme, /rendered Markdown preview mode for the notebook/i);
   assert.match(
     readme,
     /first open the exact YouTube Digest project folder that Chrome loaded through \*\*Load unpacked\*\* in your coding agent/,
