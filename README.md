@@ -16,6 +16,12 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## About this project
+
+This is a personalized fork of [zarazhangrui/youtube-digest](https://github.com/zarazhangrui/youtube-digest), an open-source Chrome extension originally built around a transcript viewer, bilingual translation, and an AI-generated overview with separately captured note cards. It isn't affiliated with or endorsed by the original author, and upstream doesn't accept issues or pull requests for the changes made here.
+
+Everything described under "New in v2.0.0" below — the AI chat, the rebuilt Markdown notebook, and Google Drive/local export — was added in this fork and doesn't exist in the original project. Transcript viewing, bilingual translation, select-and-explain, and the DeepSeek/Supadata integration come from the upstream project this was built on.
+
 ## New in v2.0.0 (update the `version` field in `manifest.json` to match if you adopt this)
 
 The Notes tab and the Overview tab have both been rebuilt from scratch:
@@ -34,7 +40,7 @@ Search, the unified Original/中文/双语 setting across Transcript and Notes, 
 
 You do not need to understand the code or use the command line. Send this message to your coding agent:
 
-> Download or clone this project into a permanent folder I choose, tell me its exact full path, and use that same folder for Chrome's Load unpacked step. If I need a suggestion during this first installation, offer `~/Documents/youtube-digest` on macOS or Linux, or `%USERPROFILE%\Documents\youtube-digest` on Windows, but do not assume either path. Walk me through installation and setup in simple terms.
+> Download or clone this project into a permanent folder I choose, tell me its exact full path, and use that same folder for Chrome's Load unpacked step. If I need a suggestion during this first installation, offer `~/Documents/youtube-digest` on macOS or Linux, or `%USERPROFILE%\Documents\youtube-digest` on Windows, but do not assume either path. Walk me through installation and setup in simple terms. https://github.com/xandrabai/youtube-digest
 
 Your agent should:
 
@@ -52,7 +58,7 @@ Never paste an API key into an AI chat, source file, screenshot, or public messa
 
 If you prefer to do it yourself:
 
-1. Open [github.com/zarazhangrui/youtube-digest](https://github.com/zarazhangrui/youtube-digest).
+1. Open [github.com/xandrabai/youtube-digest](https://github.com/xandrabai/youtube-digest).
 2. Choose **Code**, then **Download ZIP**.
 3. Choose a permanent folder and unzip the project there. Optional suggestions are `~/Documents/youtube-digest` on macOS or Linux, or `%USERPROFILE%\Documents\youtube-digest` on Windows. You may use a different folder.
 4. In Chrome, open `chrome://extensions`.
@@ -315,7 +321,6 @@ npm run package
 
 The agent should also reload the unpacked extension in Chrome — remembering that a YouTube tab open from before the reload needs its own refresh too — and test several real YouTube videos. Automated checks do not prove that live provider requests and YouTube interactions work.
 
-## 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). This is a fork of the original project credited in [About this project](#about-this-project), also MIT-licensed — check that `LICENSE` still carries its original copyright notice alongside any changes made here, which is standard practice for an MIT fork.
