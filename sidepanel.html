@@ -64,7 +64,7 @@
       <!-- Tab navigation -->
       <div class="tabs" id="tabsNav" style="display: none">
         <button class="tab active" data-tab="transcript">Transcript</button>
-        <button class="tab" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="overview">Chat</button>
         <button class="tab" data-tab="notes">Notes</button>
       </div>
     </div>
@@ -182,72 +182,87 @@
           </div>
         </div>
 
-        <!-- TAB: Overview (chapters + key quotes) - requires LLM -->
+        <!-- TAB: Chat (grounded in the transcript + notebook) - requires LLM -->
+        <!-- Replaces the old chapters/key-quotes analysis. Conversation
+             history lives only in sidepanel state (see chatMessages in
+             sidepanel.js) — it is never persisted, by design. -->
         <div class="tab-panel" data-panel="overview">
-          <!-- Chapters -->
-          <div class="section">
-            <div class="section-title">Chapters</div>
-            <ul class="chapter-list" id="chapterList">
-              <li
-                class="chapter-item"
-                style="
-                  color: var(--text-muted);
-                  cursor: default;
-                  border-color: var(--border);
-                "
+          <div class="section chat-section">
+            <div class="chat-messages" id="chatMessages">
+              <p class="chat-empty-state" id="chatEmptyState">
+                Waiting for the transcript to load...
+              </p>
+            </div>
+            <div class="chat-input-row">
+              <textarea
+                id="chatInput"
+                class="chat-input"
+                placeholder="Waiting for the transcript to load..."
+                rows="2"
+                disabled
+              ></textarea>
+              <button
+                class="chat-send-btn"
+                id="chatSendBtn"
+                type="button"
+                disabled
               >
-                Chapters will appear here
-              </li>
-            </ul>
-          </div>
-
-          <!-- Key Quotes -->
-          <div class="section">
-            <div class="section-title">Key Quotes</div>
-            <div id="quotesList">
-              <div
-                class="quote-item"
-                style="
-                  color: var(--text-muted);
-                  border-left-color: var(--border);
-                  cursor: default;
-                "
-              >
-                <div class="quote-text" style="font-style: normal">
-                  Quotes will be extracted when you view this tab...
-                </div>
-              </div>
+                Send
+              </button>
+            </div>
+            <div class="chat-footer">
+              <button class="enhance-btn" id="chatClearBtn" type="button">
+                Clear chat
+              </button>
             </div>
           </div>
         </div>
 
         <!-- TAB: Notes -->
+        <!-- A single freeform notebook per video, autosaved on a debounce.
+             The old per-quote note-card list is gone; quoting now happens via
+             the Ctrl+Shift+Q hotkey (see insertQuoteAtCursor in sidepanel.js). -->
         <div class="tab-panel" data-panel="notes">
           <div class="section">
             <div class="section-header">
-              <div class="section-title">Saved Notes</div>
-              <div class="notes-filter">
-                <button
-                  class="enhance-btn active"
-                  id="notesFilterThis"
-                  aria-pressed="true"
-                >
-                  This Video
+              <div class="section-title">Notebook</div>
+              <div class="notebook-export-actions">
+                <button class="enhance-btn" id="notebookDownloadBtn" type="button">
+                  Download
                 </button>
-                <button
-                  class="enhance-btn"
-                  id="notesFilterAll"
-                  aria-pressed="false"
+                <select
+                  class="notebook-drive-folder-select"
+                  id="notebookDriveFolderSelect"
+                  aria-label="Drive export folder"
+                  title="Drive folder new exports go to"
                 >
-                  All Notes
+                  <option value="">My Drive (root)</option>
+                  <option value="__new_folder__">+ New folder…</option>
+                </select>
+                <button class="enhance-btn" id="notebookSaveToDriveBtn" type="button">
+                  Save to Drive
                 </button>
               </div>
             </div>
-            <p class="notes-intro" id="notesIntro">
-              Move your mouse over the video and click Note to save a
-              timestamped note, or press the "n" key while the video is focused.
+            <p class="notebook-sync-status" id="notebookSyncStatus" hidden></p>
+            <p class="notebook-hint">
+              Ctrl+Click (Cmd+Click on Mac) a quote's timestamp to jump to
+              it.
             </p>
-            <div id="notesList"></div>
+            <div class="notebook-editor">
+              <div
+                id="notebookHighlightBackdrop"
+                class="notebook-text-layer notebook-highlight-backdrop"
+                aria-hidden="true"
+              ></div>
+              <textarea
+                id="notebookTextarea"
+                class="notebook-text-layer notebook-textarea"
+                placeholder="Write anything about this video…"
+                title="Ctrl+Click (Cmd+Click on Mac) a quote's timestamp to jump to it."
+              ></textarea>
+            </div>
+            <p class="notebook-hotkey-message" id="notebookHotkeyMessage" hidden></p>
           </div>
         </div>
       </div>
@@ -263,6 +278,7 @@
     </button>
 
     <script src="settings.js"></script>
+    <script src="notebook-export.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>

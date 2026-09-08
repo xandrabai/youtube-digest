@@ -33,6 +33,7 @@
   --sage-dim: rgba(124, 139, 111, 0.14);
   --success: #7c8b6f;
   --highlight: #d99a5b;
+  --link: #2563eb; /* notebook quote lines only — reads clearly against the warm palette */
 
   /* Soft shadows give depth instead of heavy borders */
   --shadow-sm: 0 1px 3px rgba(90, 80, 60, 0.06);
@@ -547,66 +548,6 @@ body {
   visibility: hidden;
 }
 
-/* ============================================================
-   CHAPTERS
-   ============================================================ */
-.chapter-list {
-  list-style: none;
-}
-
-.chapter-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 13px 15px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  margin-bottom: 9px;
-  transition: all 0.18s ease;
-  background: var(--surface);
-  cursor: pointer;
-}
-
-.chapter-item:hover {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-sm);
-  transform: translateY(-1px);
-}
-
-.chapter-timestamp {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--accent);
-  min-width: 46px;
-  padding: 3px 8px;
-  background: var(--accent-dim);
-  border-radius: var(--r-sm);
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.chapter-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.chapter-title {
-  font-family: var(--font-reading);
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.chapter-summary {
-  font-family: var(--font-reading);
-  font-size: 12.5px;
-  color: var(--text-secondary);
-  line-height: 1.5;
-}
-
 .localized-copy {
   display: flex;
   flex-direction: column;
@@ -628,108 +569,127 @@ body {
 }
 
 /* ============================================================
-   KEY QUOTES
+   CHAT TAB
    ============================================================ */
-.quote-item {
-  border-left: 4px solid var(--accent);
-  border-radius: var(--r-md);
-  padding: 16px 18px;
-  margin-bottom: 14px;
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
-  cursor: pointer;
-  transition: all 0.18s ease;
-}
-
-.quote-item:hover {
-  box-shadow: var(--shadow-md);
-  transform: translateY(-1px);
-}
-
-.quote-text {
-  font-family: var(--font-reading);
-  font-size: 14px;
-  line-height: 1.65;
-  color: var(--text);
-  margin-bottom: 10px;
-}
-
-.quote-text::before {
-  content: "\201C";
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 34px;
-  color: var(--accent);
-  line-height: 0;
-  vertical-align: -10px;
-  margin-right: 4px;
-}
-
-.quote-meta {
+/* Replaces the old chapters/key-quotes analysis with a conversation grounded
+   in the transcript and notebook. History is session-only (see chatMessages
+   in sidepanel.js) — nothing here is persisted. */
+.chat-section {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  height: calc(100vh - 210px);
+  min-height: 320px;
 }
 
-.quote-actions {
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px 12px;
 }
 
-/* One-click copy and save-note buttons on each quote */
-.quote-copy-btn,
-.quote-save-note-btn {
-  font-family: var(--font-body);
-  font-weight: 600;
-  font-size: 11px;
-  padding: 4px 11px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.18s ease;
-}
-
-.quote-copy-btn:hover,
-.quote-save-note-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-dim);
-}
-
-.quote-save-note-btn:disabled {
-  opacity: 0.7;
-  cursor: default;
-}
-
-/* Inline "add your thought" field shown under a quote right after it's saved as a note */
-.quote-note-input {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  margin-top: 10px;
-  padding: 8px 10px;
+.chat-empty-state {
+  margin: auto 0;
+  text-align: center;
   font-family: var(--font-body);
   font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--text);
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  resize: vertical;
-  min-height: 44px;
-}
-
-.quote-note-input::placeholder {
   color: var(--text-muted);
 }
 
-.quote-note-input:focus {
+.chat-message {
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  font-family: var(--font-reading);
+  font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.chat-message-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: white;
+  border-bottom-right-radius: var(--r-sm);
+}
+
+.chat-message-assistant {
+  align-self: flex-start;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-bottom-left-radius: var(--r-sm);
+}
+
+.chat-typing {
+  padding: 14px;
+}
+
+.chat-typing .loading-bar {
+  width: 60px;
+}
+
+.chat-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.chat-input {
+  flex: 1;
+  resize: none;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-reading);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.chat-input:focus {
   outline: none;
   border-color: var(--accent);
+}
+
+.chat-input:disabled {
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  cursor: not-allowed;
+}
+
+.chat-send-btn {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 12.5px;
+  padding: 10px 16px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.chat-send-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.chat-send-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.chat-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 8px;
 }
 
 /* ============================================================
@@ -1203,13 +1163,12 @@ body {
   }
 }
 
-.explain-btn,
-.selection-note-btn {
+.explain-btn {
   font-family: var(--font-body);
   font-weight: 600;
   font-size: 12px;
   letter-spacing: 0;
-  flex: 1 1 50%;
+  flex: 1 1 auto;
   min-width: 72px;
   padding: 8px 14px;
   border: none;
@@ -1222,55 +1181,19 @@ body {
     color 0.14s ease;
 }
 
-.explain-btn:hover:not(:disabled),
-.selection-note-btn:hover:not(:disabled) {
+.explain-btn:hover:not(:disabled) {
   background: var(--surface-raised);
   color: var(--accent-hover);
 }
 
-.explain-btn:focus-visible,
-.selection-note-btn:focus-visible {
+.explain-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
-.selection-note-btn {
-  border-left: 1px solid var(--border);
-}
-
-.explain-btn:disabled,
-.selection-note-btn:disabled {
+.explain-btn:disabled {
   cursor: default;
   color: var(--text-muted);
-}
-
-/* Inline "add your thought" field shown in the selection toolbar right
-   after selected transcript text is saved as a note. */
-.selection-note-input {
-  flex: 1 1 100%;
-  box-sizing: border-box;
-  width: 100%;
-  margin: 0;
-  padding: 8px 10px;
-  font-family: var(--font-body);
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--text);
-  background: var(--surface-raised);
-  border: none;
-  border-top: 1px solid var(--border);
-  border-radius: 0;
-  resize: vertical;
-  min-height: 44px;
-}
-
-.selection-note-input::placeholder {
-  color: var(--text-muted);
-}
-
-.selection-note-input:focus {
-  outline: none;
-  background: var(--surface);
 }
 
 .explain-modal-overlay {
@@ -1383,201 +1306,145 @@ body {
 /* ============================================================
    NOTES TAB
    ============================================================ */
+/* A single freeform notebook per video (replaces the old note-card list). */
 
-/* Segmented filter control (This Video / All Notes) */
-.notes-filter {
+.notebook-export-actions {
   display: flex;
-  gap: 3px;
-  padding: 3px;
-  background: var(--surface-raised);
-  border-radius: var(--r-pill);
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
-.notes-filter .enhance-btn {
-  padding: 5px 12px;
-  font-size: 11px;
-  border: none;
-  background: none;
-  color: var(--text-muted);
-}
-
-.notes-filter .enhance-btn:hover:not(:disabled) {
-  background: transparent;
-  color: var(--text-secondary);
-}
-
-.notes-filter .enhance-btn:focus-visible {
-  outline: 3px solid var(--accent-hover);
-  outline-offset: 2px;
-}
-
-.notes-filter .enhance-btn.active {
-  background: var(--accent);
-  color: white;
-  box-shadow: 0 2px 6px rgba(200, 103, 79, 0.3);
-}
-
-.notes-filter .enhance-btn.active:hover:not(:disabled) {
-  background: var(--accent-hover);
-  color: white;
-}
-
-.notes-filter .enhance-btn.active:focus-visible {
-  background: var(--accent);
-  color: white;
-}
-
-.notes-intro {
-  font-family: var(--font-reading);
-  font-size: 13.5px;
-  color: var(--text-muted);
-  text-align: center;
-  padding: 44px 20px;
-  line-height: 1.7;
-}
-
-.note-item {
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 15px 16px;
-  margin-bottom: 11px;
+/* The global default Drive export folder — a dropdown of folders this
+   extension has created (drive.file can't browse pre-existing ones), always
+   visible next to the export buttons and changeable at any time. */
+.notebook-drive-folder-select {
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--text);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
-  transition: all 0.18s ease;
-}
-
-.note-item:hover {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-md);
-}
-
-.note-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 11px;
-}
-
-.note-timestamp {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--accent);
-  background: var(--accent-dim);
-  padding: 3px 9px;
-  border-radius: var(--r-pill);
-  cursor: pointer;
-  transition: all 0.18s ease;
-}
-
-.note-timestamp:hover {
-  background: var(--accent);
-  color: white;
-}
-
-.note-video-title {
-  font-family: var(--font-reading);
-  font-size: 11.5px;
-  color: var(--text-muted);
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.note-delete {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
-  place-items: center;
-  margin-left: auto;
-  padding: 0;
   border: 1px solid var(--border);
-  border-radius: 50%;
-  background: var(--surface-raised);
+  border-radius: var(--r-sm);
+  padding: 4px 8px;
+  max-width: 140px;
+}
+
+/* Persistent sync status for "Save to Drive" (e.g. "Synced 2 min ago"), or
+   an inline error when a Drive export fails. Unlike .notebook-hotkey-message
+   this does not auto-clear — it reflects durable state (whether the current
+   notebook has ever synced), not a one-off hint. */
+.notebook-sync-status {
+  margin: 0 0 8px;
+  font-family: var(--font-body);
+  font-size: 12px;
   color: var(--text-muted);
-  cursor: pointer;
-  transition:
-    border-color 0.18s ease,
-    background 0.18s ease,
-    color 0.18s ease;
 }
 
-.note-delete:hover {
-  border-color: var(--accent);
+.notebook-sync-status a {
+  color: var(--link);
+}
+
+.notebook-sync-status-error {
   color: var(--accent);
-  background: var(--accent-dim);
 }
 
-.note-delete:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+/* Shown the instant "Save to Drive" is clicked, distinct from both the
+   success (.notebook-sync-status default) and error styling above, so a
+   save-in-progress never reads as a stale success or a failure. */
+.notebook-sync-status-pending {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
-.note-delete svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+/* Permanent hint for the quote click-to-seek shortcut — there's no way to
+   show a hover affordance on specific characters inside a plain textarea. */
+.notebook-hint {
+  margin: 0 0 8px;
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
-.note-text {
+/* The notebook is a highlighted-textarea overlay (the standard CodeJar/
+   Prism-live-editor technique): a real, fully interactive <textarea> with
+   transparent text sits on top of a same-sized backdrop <div> that shows
+   colored spans for quote lines. Only the textarea is ever clicked, typed
+   into, or selected — the backdrop is aria-hidden and pointer-events:none. */
+.notebook-editor {
+  position: relative;
+}
+
+/* CRITICAL: every property that affects text layout — font metrics, box
+   sizing, padding/border width, and wrapping — lives here and ONLY here, on
+   a class shared by both the textarea and the backdrop. If either element
+   ever specifies one of these separately, the highlighting will drift out
+   of alignment with the real text the next time this is touched. */
+.notebook-text-layer {
+  display: block;
+  margin: 0;
+  width: 100%;
+  min-height: 60vh;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
   font-family: var(--font-reading);
   font-size: 14px;
   line-height: 1.65;
-  color: var(--text);
-  margin-bottom: 12px;
+  letter-spacing: normal;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
-.note-user-note-input {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  margin-bottom: 12px;
-  padding: 8px 10px;
-  font-family: var(--font-body);
-  font-size: 12.5px;
-  line-height: 1.5;
+.notebook-highlight-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
   color: var(--text);
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  resize: vertical;
-  min-height: 40px;
+  background: var(--surface);
+  pointer-events: none;
 }
 
-.note-user-note-input::placeholder {
+/* Quote lines inserted by the Ctrl+Shift+Q hotkey — visual confirmation of
+   what Ctrl/Cmd+Click already seeks on. */
+.quote-line {
+  color: var(--link);
+}
+
+/* The hidden "<!-- segment-... -->" comment line under each quote — it's
+   metadata, not prose, so it's de-emphasized rather than full-strength text
+   or the same blue as the quote itself. */
+.quote-meta {
   color: var(--text-muted);
 }
 
-.note-user-note-input:focus {
+.notebook-textarea {
+  position: relative;
+  z-index: 1;
+  resize: none; /* dragging this out of size with the backdrop would break alignment */
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+  border-color: var(--border);
+}
+
+.notebook-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.notebook-textarea:focus {
   outline: none;
   border-color: var(--accent);
 }
 
-.note-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.note-action-btn {
+/* Brief inline feedback for the notebook's keyboard shortcuts (e.g. when
+   Ctrl+Shift+Q can't find a matching transcript line). Not a toast, not an
+   alert — a small line near the textarea that clears itself. */
+.notebook-hotkey-message {
+  margin: 8px 0 0;
   font-family: var(--font-body);
-  font-weight: 600;
-  font-size: 11.5px;
-  padding: 6px 12px;
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.18s ease;
-}
-
-.note-action-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-dim);
+  font-size: 12px;
+  color: var(--text-muted);
 }

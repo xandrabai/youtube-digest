@@ -16,7 +16,6 @@ const debugLog = (...args) => {
 
 let currentVideoId = null;
 let currentVideoUrl = null;
-let currentAnalysis = null;
 let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
 let currentTranscriptTimestamped = null; // With timestamps for AI analysis
@@ -25,9 +24,18 @@ let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
-let isAnalysisLoading = false; // Track if analysis is in progress
 let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
 let errorAction = null;
+
+// --- Chat state (Chat tab, grounded in the transcript + notebook) ---
+// Session-only by design: resets on video change or "Clear chat", never
+// persisted to storage.
+let chatMessages = [];
+let chatRequestInFlight = false;
+// Bumped by resetChat (video change or "Clear chat"), the same invalidation
+// pattern as translationGeneration: a reply that lands after either one is
+// simply discarded instead of reappearing in a conversation it no longer belongs to.
+let chatGeneration = 0;
 
 // --- Translation state ---
 // The universal language control supports original content, Chinese, and an
@@ -43,8 +51,22 @@ let transcriptParagraphCache = new Map();
 let interfaceTranslationCache = new Map();
 let interfaceTranslationInFlight = new Set();
 let interfaceTranslationFailures = new Set();
-let currentNotes = [];
-let currentNotesFilterVideoId = null;
+// Autosave debounce for the per-video notebook (see NOTEBOOK section below).
+let notebookSaveTimer = null;
+const NOTEBOOK_SAVE_DEBOUNCE_MS = 800;
+// Drive sync state for the current video's notebook — null until the first
+// successful "Save to Drive". Repopulated from storage in loadNotebook.
+let currentNotebookSync = null;
+let notebookDriveSyncInFlight = false;
+// The global (not per-video) default Drive export folder — one of the
+// folders this extension itself created (see createDriveFolder in
+// background.js). Loaded once at startup, not per-video.
+let currentDriveFolder = null;
+let driveFolderList = [];
+// Keeps "Synced X ago" advancing while the panel stays open — a frozen
+// label reads as broken. See tickNotebookSyncStatusLabel.
+let notebookSyncStatusTickTimer = null;
+const NOTEBOOK_SYNC_STATUS_TICK_MS = 45_000;
 const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
 const TRANSLATION_BATCH_SIZE = 3;
 
@@ -256,6 +278,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   setTranscriptModeButtons("original");
   setupEventListeners();
   await evictOldCacheEntries(20);
+  // Global (not per-video) setting — load once at startup, not per-video.
+  void loadDriveFolderSetting();
+  notebookSyncStatusTickTimer = setInterval(
+    tickNotebookSyncStatusLabel,
+    NOTEBOOK_SYNC_STATUS_TICK_MS,
+  );
 
   const configStatus = await chrome.runtime.sendMessage({
     action: "checkConfig",
@@ -284,17 +312,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     updateLoading(message.title, message.subtitle);
     sendResponse({ success: true });
   }
-  if (message.action === "noteSaved") {
-    // A note was created or updated (from any surface — this panel, the
-    // player toast, etc). Patch just that note in place rather than
-    // reloading the whole list, so an in-progress edit on a different note
-    // isn't discarded out from under the user.
-    const filterAll = document
-      .getElementById("notesFilterAll")
-      ?.classList.contains("active");
-    handleNoteSavedBroadcast(message.note, filterAll ? null : currentVideoId);
-    sendResponse({ success: true });
-  }
+  // The old "noteSaved" broadcast patched note-cards across surfaces. That
+  // system is gone — quote-capture mechanism returns in a later step.
   return false;
 });
 
@@ -434,6 +453,7 @@ function setupEventListeners() {
   // pagehide also covers closing the side panel without a tab change.
   window.addEventListener("pagehide", () => {
     void saveCurrentTranscriptViewState();
+    void flushNotebookSave();
   });
 
   // Follow playback button — re-enables auto-scroll after user scrolled away
@@ -451,24 +471,44 @@ function setupEventListeners() {
       }
     });
 
-  // Notes filter buttons
-  document.getElementById("notesFilterThis")?.addEventListener("click", () => {
-    setNotesFilter(false);
-    loadNotes(currentVideoId);
-  });
-  document.getElementById("notesFilterAll")?.addEventListener("click", () => {
-    setNotesFilter(true);
-    loadNotes(null); // Load all notes
-  });
-}
+  // Notebook export — Download builds a local .md file; Save to Drive
+  // uploads/updates a file in the user's Google Drive.
+  document
+    .getElementById("notebookDownloadBtn")
+    ?.addEventListener("click", downloadNotebookExport);
+  document
+    .getElementById("notebookSaveToDriveBtn")
+    ?.addEventListener("click", () => void saveNotebookToDrive());
+  document
+    .getElementById("notebookDriveFolderSelect")
+    ?.addEventListener("change", (event) => void handleDriveFolderSelectChange(event));
 
-function setNotesFilter(showAll) {
-  const thisVideoButton = document.getElementById("notesFilterThis");
-  const allNotesButton = document.getElementById("notesFilterAll");
-  thisVideoButton?.classList.toggle("active", !showAll);
-  thisVideoButton?.setAttribute("aria-pressed", String(!showAll));
-  allNotesButton?.classList.toggle("active", showAll);
-  allNotesButton?.setAttribute("aria-pressed", String(showAll));
+  // Notebook autosave — debounced so we don't write on every keystroke.
+  const notebookTextarea = document.getElementById("notebookTextarea");
+  notebookTextarea?.addEventListener("input", scheduleNotebookSave);
+  // Markdown formatting shortcuts, scoped to this textarea only.
+  notebookTextarea?.addEventListener("keydown", handleNotebookShortcutKeydown);
+  // Ctrl/Cmd+Click a quote's timestamp to seek the video.
+  notebookTextarea?.addEventListener("click", handleNotebookQuoteClick);
+  // Keep the highlight backdrop's scroll position in lockstep with the
+  // (invisible) real text scrolling underneath it.
+  notebookTextarea?.addEventListener("scroll", () => {
+    const backdrop = document.getElementById("notebookHighlightBackdrop");
+    if (!backdrop) return;
+    backdrop.scrollTop = notebookTextarea.scrollTop;
+    backdrop.scrollLeft = notebookTextarea.scrollLeft;
+  });
+
+  // Chat tab — Enter sends, Shift+Enter inserts a newline.
+  document
+    .getElementById("chatInput")
+    ?.addEventListener("keydown", handleChatInputKeydown);
+  document
+    .getElementById("chatSendBtn")
+    ?.addEventListener("click", () => void sendChatMessage());
+  document
+    .getElementById("chatClearBtn")
+    ?.addEventListener("click", () => resetChat());
 }
 
 // ============================================================
@@ -568,7 +608,7 @@ function extractVideoId(url) {
 
 async function startDigest(videoId, videoUrl) {
   // Check if we already have this video loaded in memory
-  if (videoId === currentVideoId && currentAnalysis) {
+  if (videoId === currentVideoId && currentTranscript) {
     showState("results");
     return;
   }
@@ -600,12 +640,10 @@ async function startDigest(videoId, videoUrl) {
     debugLog("Loading from cache:", videoId);
     currentVideoId = videoId;
     currentVideoUrl = videoUrl;
-    currentAnalysis = cached.analysis || null;
     currentTranscript = cached.transcript;
     currentTranscriptText = cached.transcriptText;
     currentTranscriptTimestamped = cached.transcriptTimestamped;
     currentTranscriptLanguage = cached.transcriptLanguage || null;
-    isAnalysisLoading = false;
 
     // Restore semantic-segment translations from persistent storage.
     if (cached.paragraphCache) {
@@ -629,18 +667,13 @@ async function startDigest(videoId, videoUrl) {
     // Always render transcript first
     renderTranscript();
 
-    // Render analysis if we have it cached
-    if (currentAnalysis) {
-      renderAnalysisResults(currentAnalysis);
-      highlightMomentsOnPage(currentAnalysis.keyMoments);
-    }
-
     showState("results");
     document.getElementById("tabsNav").style.display = "flex";
     restorePendingTranscriptViewState(videoId);
 
-    // Load notes for this video
-    loadNotes(videoId);
+    // Load this video's notebook, and reset the chat to this video's context.
+    void loadNotebook(videoId);
+    resetChat();
 
     // Setup explain feature
     setupExplainFeature();
@@ -650,12 +683,10 @@ async function startDigest(videoId, videoUrl) {
 
   currentVideoId = videoId;
   currentVideoUrl = videoUrl;
-  currentAnalysis = null;
   currentTranscript = null;
   currentTranscriptText = null;
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
-  isAnalysisLoading = false;
 
   if (currentVideoTitle || currentChannelName) {
     const videoInfo = document.getElementById("videoInfo");
@@ -698,18 +729,16 @@ async function startDigest(videoId, videoUrl) {
   document.getElementById("tabsNav").style.display = "flex";
   restorePendingTranscriptViewState(videoId);
 
-  // Load notes for this video
-  loadNotes(videoId);
+  // Load this video's notebook, and reset the chat to this video's context.
+  void loadNotebook(videoId);
+  resetChat();
 
   // Setup explain feature for text selection
   setupExplainFeature();
   if (currentTranscriptMode !== "original") translateTranscript();
 
-  // Save transcript to cache (without analysis)
+  // Save transcript to cache
   await saveToCache(videoId);
-
-  // DON'T run LLM analysis automatically - wait for user to click Overview tab
-  // This saves tokens when user just wants to see the transcript
 }
 
 // ============================================================
@@ -834,244 +863,178 @@ async function translateInterfaceSegments(surface, segments, rerender) {
   }
 }
 
-function getOverviewTranslationSegments() {
-  if (!currentAnalysis) return [];
-  const segments = [];
-  (currentAnalysis.chapters || []).forEach((chapter, index) => {
-    if (chapter.title) {
-      segments.push({ id: `chapter-${index}-title`, text: chapter.title });
-    }
-    if (chapter.summary) {
-      segments.push({ id: `chapter-${index}-summary`, text: chapter.summary });
-    }
-  });
-  [...(currentAnalysis.keyQuotes || [])]
-    .sort((a, b) => (a.timestampSeconds || 0) - (b.timestampSeconds || 0))
-    .forEach((quote, index) => {
-      if (quote.quote) segments.push({ id: `quote-${index}`, text: quote.quote });
-    });
-  return segments;
-}
-
-function translateOverviewContent() {
-  return translateInterfaceSegments(
-    "overview",
-    getOverviewTranslationSegments(),
-    () => {
-      const contentArea = document.getElementById("contentArea");
-      const scrollTop = contentArea?.scrollTop || 0;
-      renderAnalysisResults(currentAnalysis);
-      if (contentArea) contentArea.scrollTop = scrollTop;
-    },
-  );
-}
-
-function getNoteTranslationId(note, index) {
-  const stablePart = String(note.id || note.createdAt || index)
-    .replace(/[^A-Za-z0-9_-]/g, "-")
-    .slice(0, 96);
-  return `note-${stablePart || index}`;
-}
-
-function translateNotesContent() {
-  const segments = currentNotes.map((note, index) => ({
-    id: getNoteTranslationId(note, index),
-    text: note.text || "",
-  }));
-  return translateInterfaceSegments("notes", segments, () => {
-    const contentArea = document.getElementById("contentArea");
-    const scrollTop = contentArea?.scrollTop || 0;
-    renderNotes(currentNotes, currentNotesFilterVideoId);
-    if (contentArea) contentArea.scrollTop = scrollTop;
-  });
-}
+// ============================================================
+// CHAT — a conversation grounded in this video's transcript and notebook
+// ============================================================
+// Replaces the old chapters/key-quotes analysis. This is plain conversational
+// text, not structured extraction: no responseFormat, no timestamp/schema
+// validation to rebuild. History is session-only (see chatMessages state) —
+// it resets on video change or "Clear chat", and is never persisted.
 
 /**
- * Renders the analysis results into the Overview tab.
- * Shows chapters and key quotes only.
+ * True once there's a transcript to ground answers in and no request is
+ * currently in flight. Both the input and Send button follow this.
  */
-function renderAnalysisResults(analysis) {
-  // Chapters
-  const chapterList = document.getElementById("chapterList");
-  chapterList.innerHTML = "";
-  (analysis.chapters || []).forEach((chapter, index) => {
-    const li = document.createElement("li");
-    li.className = "chapter-item";
-    li.dataset.seconds = chapter.timestampSeconds;
-    li.innerHTML = `
-      <span class="chapter-timestamp">${escapeHtml(chapter.timestamp)}</span>
-      <div class="chapter-content">
-        <span class="chapter-title">${renderLocalizedContent(chapter.title, "overview", `chapter-${index}-title`)}</span>
-        <span class="chapter-summary">${renderLocalizedContent(chapter.summary || "", "overview", `chapter-${index}-summary`)}</span>
-      </div>
-    `;
-    li.addEventListener("click", () => {
-      debugLog(
-        "[YouTube Digest Panel] Chapter clicked:",
-        chapter.timestamp,
-        chapter.timestampSeconds,
-      );
-      seekTo(chapter.timestampSeconds);
-    });
-    chapterList.appendChild(li);
-  });
+function chatInputEnabled() {
+  return Boolean(currentTranscriptTimestamped) && !chatRequestInFlight;
+}
 
-  // Quotes - sort by timestamp (chronological order)
-  const quotesList = document.getElementById("quotesList");
-  quotesList.innerHTML = "";
-  const sortedQuotes = [...(analysis.keyQuotes || [])].sort(
-    (a, b) => (a.timestampSeconds || 0) - (b.timestampSeconds || 0),
-  );
-  sortedQuotes.forEach((quote, index) => {
-    const div = document.createElement("div");
-    div.className = "quote-item";
-    div.dataset.seconds = quote.timestampSeconds;
-    div.innerHTML = `
-      <div class="quote-text">${renderLocalizedContent(quote.quote, "overview", `quote-${index}`)}</div>
-      <div class="quote-meta">
-        <span class="quote-timestamp">${escapeHtml(quote.timestamp)}</span>
-        <div class="quote-actions">
-          <button class="quote-save-note-btn" title="Save this quote as a note">Note</button>
-          <button class="quote-copy-btn" title="Copy this quote">Copy</button>
-        </div>
-      </div>
-    `;
-    div.addEventListener("click", () => {
-      debugLog(
-        "[YouTube Digest Panel] Quote clicked:",
-        quote.timestamp,
-        quote.timestampSeconds,
-      );
-      seekTo(quote.timestampSeconds);
-    });
+function chatWaitingPlaceholder() {
+  return currentTranscriptTimestamped
+    ? "Ask about this video..."
+    : "Waiting for the transcript to load...";
+}
 
-    const quoteCopyBtn = div.querySelector(".quote-copy-btn");
-    quoteCopyBtn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      try {
-        await navigator.clipboard.writeText(
-          getLocalizedPlainText(quote.quote, "overview", `quote-${index}`),
-        );
-        quoteCopyBtn.textContent = "Copied";
-        setTimeout(() => {
-          quoteCopyBtn.textContent = "Copy";
-        }, 1500);
-      } catch (err) {
-        console.error("Copy failed:", err);
-      }
-    });
-
-    const quoteSaveNoteBtn = div.querySelector(".quote-save-note-btn");
-    quoteSaveNoteBtn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      await saveQuoteAsNote(quote, quoteSaveNoteBtn);
-    });
-
-    quotesList.appendChild(div);
-  });
-
-  if (
-    currentTranscriptMode !== "original" &&
-    resultTabIsActive("overview")
-  ) {
-    void translateOverviewContent();
+function updateChatInputState() {
+  const input = document.getElementById("chatInput");
+  const sendBtn = document.getElementById("chatSendBtn");
+  const enabled = chatInputEnabled();
+  if (input) {
+    input.disabled = !enabled;
+    input.placeholder = chatWaitingPlaceholder();
   }
+  if (sendBtn) sendBtn.disabled = !enabled;
 }
 
 /**
- * Saves a key quote as a timestamped note.
+ * Builds one chat bubble. The user's own typed text is never rendered as
+ * markup (.textContent only). The AI's reply goes through the same
+ * escape-then-allowlist convention as transcript/translation text
+ * (renderSubtitleInlineMarkup escapes everything, then restores only
+ * i/em/b/strong/u/br) rather than raw innerHTML.
  */
-async function saveQuoteAsNote(quote, btn) {
-  if (!currentVideoId) return;
+function buildChatMessageElement(message) {
+  const bubble = document.createElement("div");
+  bubble.className = `chat-message chat-message-${message.role}`;
+  if (message.role === "user") {
+    bubble.textContent = message.content;
+  } else if (message.error) {
+    bubble.classList.add("explain-error");
+    bubble.textContent = message.content;
+  } else {
+    bubble.innerHTML = renderSubtitleInlineMarkup(message.content).replace(
+      /\n/g,
+      "<br>",
+    );
+  }
+  return bubble;
+}
 
-  const originalText = btn.textContent;
-  btn.textContent = "Saving...";
-  btn.disabled = true;
+function renderChatMessages() {
+  const container = document.getElementById("chatMessages");
+  if (!container) return;
+  container.innerHTML = "";
 
+  if (!chatMessages.length && !chatRequestInFlight) {
+    const empty = document.createElement("p");
+    empty.className = "chat-empty-state";
+    empty.textContent = currentTranscriptTimestamped
+      ? "Ask a question about this video."
+      : "Waiting for the transcript to load...";
+    container.appendChild(empty);
+    return;
+  }
+
+  chatMessages.forEach((message) => {
+    container.appendChild(buildChatMessageElement(message));
+  });
+
+  if (chatRequestInFlight) {
+    const typing = document.createElement("div");
+    typing.className = "chat-message chat-message-assistant chat-typing";
+    typing.innerHTML = `<div class="loading-bar"></div>`;
+    container.appendChild(typing);
+  }
+
+  container.scrollTop = container.scrollHeight;
+}
+
+/**
+ * Resets the conversation to this video's context. Called on video change
+ * (an MVP scope choice: chat history is never persisted) and by "Clear chat".
+ */
+function resetChat() {
+  chatGeneration += 1;
+  chatMessages = [];
+  chatRequestInFlight = false;
+  renderChatMessages();
+  updateChatInputState();
+}
+
+/**
+ * Turns a chatWithTranscript failure into the message shown in the chat.
+ * Branches on .code the way other error-code responses in this codebase do
+ * (e.g. handleFetchTranscript's NO_SUPADATA_KEY) — requestAiCompletion's
+ * thrown errors already carry a human-readable .message for every code
+ * (NO_AI_KEY, AI_IDLE_TIMEOUT, AI_HARD_TIMEOUT, EMPTY_AI_RESPONSE,
+ * AI_RESPONSE_TOO_LARGE), so this mostly just forwards it.
+ */
+function chatErrorMessage(result) {
+  if (result?.code === "NO_AI_KEY") {
+    return (
+      result.error || "DeepSeek API key not configured. Open YouTube Digest Settings."
+    );
+  }
+  return result?.error || "Something went wrong. Please try again.";
+}
+
+async function sendChatMessage() {
+  const input = document.getElementById("chatInput");
+  if (!input || !chatInputEnabled()) return;
+
+  const question = input.value.trim();
+  if (!question) return;
+
+  chatMessages.push({ role: "user", content: question });
+  input.value = "";
+  chatRequestInFlight = true;
+  updateChatInputState();
+  renderChatMessages();
+
+  const videoId = currentVideoId;
+  const generation = chatGeneration;
   try {
     const result = await chrome.runtime.sendMessage({
-      action: "saveNote",
-      videoId: currentVideoId,
-      timestamp: quote.timestampSeconds,
-      videoTitle: currentVideoTitle,
-      channelName: currentChannelName,
+      action: "chatWithTranscript",
+      videoId,
+      messages: chatMessages,
     });
 
-    if (result.success) {
-      btn.textContent = "Saved";
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }, 1500);
-      showQuoteNoteInput(btn, result.note);
-      // Refresh notes list if on Notes tab
-      loadNotes(currentVideoId);
+    // The video may have changed, or the user pressed "Clear chat", while
+    // this was in flight — either way, this reply no longer belongs here.
+    if (generation !== chatGeneration) return;
+
+    if (result?.success) {
+      chatMessages.push({ role: "assistant", content: result.reply });
     } else {
-      console.error("[YouTube Digest] Save quote as note failed:", result.error);
-      btn.textContent = "Error";
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }, 1500);
+      chatMessages.push({
+        role: "assistant",
+        content: chatErrorMessage(result),
+        error: true,
+      });
     }
   } catch (error) {
-    console.error("[YouTube Digest] Save quote as note error:", error);
-    btn.textContent = "Error";
-    setTimeout(() => {
-      btn.textContent = originalText;
-      btn.disabled = false;
-    }, 1500);
+    if (generation === chatGeneration) {
+      chatMessages.push({
+        role: "assistant",
+        content: `Error: ${error.message}`,
+        error: true,
+      });
+    }
+  }
+
+  if (generation === chatGeneration) {
+    chatRequestInFlight = false;
+    updateChatInputState();
+    renderChatMessages();
   }
 }
 
-/**
- * Shows an inline textarea under a saved quote so the user can attach their
- * own thought. Saved on blur via the updateNote action, keyed to the note's id.
- */
-function showQuoteNoteInput(btn, note) {
-  const quoteItem = btn.closest(".quote-item");
-  if (!quoteItem || !note?.id) return;
-
-  // A quote can be saved again after the fact — don't stack a second input.
-  quoteItem.querySelector(".quote-note-input")?.remove();
-
-  const textarea = document.createElement("textarea");
-  textarea.className = "quote-note-input";
-  textarea.placeholder = "Add your thought…";
-
-  // The quote row seeks the video on click — keep interacting with the
-  // textarea from triggering that.
-  textarea.addEventListener("click", (e) => e.stopPropagation());
-  textarea.addEventListener("mousedown", (e) => e.stopPropagation());
-
-  textarea.addEventListener("blur", async () => {
-    try {
-      await chrome.runtime.sendMessage({
-        action: "updateNote",
-        noteId: note.id,
-        userNote: textarea.value,
-      });
-    } catch (error) {
-      console.error("[YouTube Digest] Update note error:", error);
-    }
-  });
-
-  quoteItem.appendChild(textarea);
-}
-
-/**
- * Legacy function for backwards compatibility with cached data.
- * Renders both transcript and analysis.
- */
-function renderResults(analysis) {
-  renderAnalysisResults(analysis);
-
-  renderTranscript();
-
-  document.getElementById("tabsNav").style.display = "flex";
-
-  // Setup explain feature for text selection
-  setupExplainFeature();
+function handleChatInputKeydown(event) {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    void sendChatMessage();
+  }
 }
 
 /**
@@ -1099,6 +1062,16 @@ function seekFromTranscriptEntryClick(event, seconds) {
   seekTo(seconds);
 }
 
+/**
+ * Formats a seconds offset as "M:SS". Shared by every transcript-row
+ * renderer and the notebook's quote-insert hotkey so there's one MM:SS rule.
+ */
+function formatTimestampLabel(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
 function renderTranscript() {
   if (!currentTranscript) return;
 
@@ -1116,9 +1089,7 @@ function renderTranscript() {
     div.className = "transcript-entry";
     div.dataset.seconds = group.start;
 
-    const minutes = Math.floor(group.start / 60);
-    const seconds = Math.floor(group.start % 60);
-    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
+    const timestamp = formatTimestampLabel(group.start);
 
     div.innerHTML = `
       <span class="transcript-time">${timestamp}</span>
@@ -1504,8 +1475,7 @@ function switchTab(tabName) {
     stopPlaybackTracking();
   }
 
-  // Saved notes are stored newest first. Open Notes at the top so the note the
-  // user just created is the first item they see.
+  // Open Notes scrolled to the top of the panel every time.
   if (tabName === "notes") {
     requestAnimationFrame(() => {
       const contentArea = document.getElementById("contentArea");
@@ -1517,19 +1487,10 @@ function switchTab(tabName) {
   }
 
   // Translate only the visible tab. This prevents hidden surfaces from using
-  // tokens or competing with the batch queue the user is waiting for.
-  if (tabName === "overview") {
-    if (!currentAnalysis && !isAnalysisLoading) {
-      triggerAnalysis();
-    } else if (currentAnalysis && currentTranscriptMode !== "original") {
-      void translateOverviewContent();
-    }
-  } else if (
-    tabName === "notes" &&
-    currentTranscriptMode !== "original"
-  ) {
-    void translateNotesContent();
-  } else if (
+  // tokens or competing with the batch queue the user is waiting for. The
+  // Chat tab has no translatable pre-rendered content (it's a live
+  // conversation), so it needs no branch here.
+  if (
     tabName === "transcript" &&
     currentTranscriptMode !== "original" &&
     !transcriptScrollObserver
@@ -1538,68 +1499,20 @@ function switchTab(tabName) {
   }
 }
 
-/**
- * Triggers the LLM analysis (lazy-loaded when user clicks Overview or Quotes tab).
- * This saves tokens by not running analysis until needed.
- */
-async function triggerAnalysis() {
-  if (!currentTranscriptTimestamped || isAnalysisLoading || currentAnalysis)
-    return;
-
-  isAnalysisLoading = true;
-
-  // Show loading indicators in the Overview tab
-  const chapterList = document.getElementById("chapterList");
-  const quotesList = document.getElementById("quotesList");
-
-  if (chapterList)
-    chapterList.innerHTML =
-      '<li class="chapter-item" style="color: var(--text-muted); border: none;">Loading chapters...</li>';
-  if (quotesList)
-    quotesList.innerHTML =
-      '<div class="quote-item" style="color: var(--text-muted); border-left-color: var(--border);">Loading quotes...</div>';
-
-  try {
-    const analysisResult = await chrome.runtime.sendMessage({
-      action: "analyzeTranscript",
-      transcriptText: currentTranscriptTimestamped,
-      videoTitle: currentVideoTitle,
-      channelName: currentChannelName,
-      videoDescription: currentVideoDescription,
-      videoDuration: currentVideoDuration,
-    });
-
-    if (!analysisResult.success) {
-      if (chapterList)
-        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Analysis failed: ${escapeHtml(analysisResult.error || "Unknown error")}</li>`;
-      isAnalysisLoading = false;
-      return;
-    }
-
-    currentAnalysis = analysisResult.analysis;
-    renderAnalysisResults(currentAnalysis);
-    highlightMomentsOnPage(currentAnalysis.keyMoments);
-
-    // Save to cache now that we have analysis
-    await saveToCache(currentVideoId);
-  } catch (error) {
-    console.error("[YouTube Digest Panel] Analysis error:", error);
-    if (chapterList)
-      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Error: ${escapeHtml(error.message)}</li>`;
-  }
-
-  isAnalysisLoading = false;
-}
-
 // ============================================================
 // TIMESTAMP / SEEK
 // ============================================================
 
+/**
+ * Seeks the YouTube player. Returns true/false so callers that care whether
+ * it actually worked (e.g. the notebook's quote click-to-seek) can react;
+ * existing fire-and-forget callers just ignore the return value.
+ */
 async function seekTo(seconds) {
   debugLog("[YouTube Digest Panel] seekTo called with:", seconds);
   if (seconds === undefined || seconds === null) {
     debugLog("[YouTube Digest Panel] seekTo aborted - no seconds value");
-    return;
+    return false;
   }
 
   const payload = {
@@ -1613,7 +1526,7 @@ async function seekTo(seconds) {
       try {
         await chrome.tabs.sendMessage(youtubeTabId, payload);
         debugLog("[YouTube Digest Panel] seekTo direct success");
-        return;
+        return true;
       } catch (directErr) {
         debugLog(
           "[YouTube Digest Panel] Direct seekTo failed, falling back to relay:",
@@ -1628,42 +1541,10 @@ async function seekTo(seconds) {
       payload,
     });
     debugLog("[YouTube Digest Panel] seekTo relay result:", result);
+    return Boolean(result?.success);
   } catch (error) {
     console.error("[YouTube Digest Panel] seekTo error:", error);
-  }
-}
-
-/**
- * Plays a saved note at its timestamp.
- * - If the note belongs to the video currently open, we seek the player in place.
- * - If it belongs to a DIFFERENT video (e.g. viewing "All Notes"), seeking the
- *   current player would jump to the wrong content, so we open that video in a
- *   new tab at the right timestamp instead.
- */
-function playNote(note) {
-  if (note.videoId && note.videoId === currentVideoId) {
-    seekTo(note.timestampSeconds);
-  } else {
-    // note.timestampedUrl already includes the &t=<seconds>s anchor
-    chrome.tabs.create({ url: note.timestampedUrl });
-  }
-}
-
-async function highlightMomentsOnPage(moments) {
-  if (!moments || !moments.length) return;
-
-  try {
-    // Route through background script for reliable message passing
-    await chrome.runtime.sendMessage({
-      action: "relayToContent",
-      payload: {
-        action: "highlightMoments",
-        moments: moments,
-        videoDuration: currentVideoDuration,
-      },
-    });
-  } catch (error) {
-    console.error("Highlight error:", error);
+    return false;
   }
 }
 
@@ -1747,7 +1628,11 @@ function dismissSelectionActions(clearSelection = false) {
 
 /**
  * Sets up text selection handling in the transcript.
- * When the user selects text, shows Explain and Note actions.
+ * When the user selects text, shows an Explain action.
+ *
+ * The selection toolbar used to also offer a "Note" button that saved the
+ * exact selected words (see showSelectionNoteInput, removed). Quote-capture
+ * mechanism returns in a later step.
  */
 function setupExplainFeature() {
   const transcriptList = document.getElementById("transcriptList");
@@ -1771,23 +1656,15 @@ function setupExplainFeature() {
   tooltip.setAttribute("aria-label", "Selected transcript actions");
   tooltip.innerHTML = `
     <button class="explain-btn" type="button">Explain</button>
-    <button class="selection-note-btn" type="button">Note</button>
   `;
   tooltip.style.display = "none";
   document.body.appendChild(tooltip);
 
   let selectedText = "";
-  let selectedTimestamp = 0;
 
-  // Interacting with either action must preserve the transcript selection and
-  // stay isolated from document and row click behavior. The note-input
-  // textarea is the exception — it needs the default mousedown behavior so
-  // the browser actually focuses it.
+  // Interacting with the toolbar must preserve the transcript selection and
+  // stay isolated from document and row click behavior.
   tooltip.addEventListener("mousedown", (event) => {
-    if (event.target.classList.contains("selection-note-input")) {
-      event.stopPropagation();
-      return;
-    }
     event.preventDefault();
     event.stopPropagation();
   });
@@ -1802,17 +1679,13 @@ function setupExplainFeature() {
   document.addEventListener(
     "mouseup",
     (event) => {
-      // A mouseup inside the tooltip itself (e.g. focusing the note-input
-      // textarea) clears the transcript selection as a side effect — that
-      // must not re-evaluate and hide the tooltip out from under the user.
       if (tooltip.contains(event.target)) return;
 
       const selection = window.getSelection();
       const text = selection?.toString().trim() || "";
       const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
 
-      // Both ends must be inside the transcript. The first selected row
-      // supplies the timestamp when the selection spans more than one row.
+      // Both ends must be inside the transcript.
       const isInTranscript = Boolean(
         range &&
           transcriptList.contains(range.startContainer) &&
@@ -1822,18 +1695,6 @@ function setupExplainFeature() {
       // Allow any selection length.
       if (text.length > 0 && isInTranscript) {
         selectedText = text;
-        const startElement =
-          range.startContainer.nodeType === 1
-            ? range.startContainer
-            : range.startContainer.parentElement;
-        const selectedRow = startElement?.closest(".transcript-entry");
-        const rowSeconds = Number(selectedRow?.dataset.seconds);
-        selectedTimestamp = Number.isFinite(rowSeconds) ? rowSeconds : 0;
-
-        // A fresh selection starts a new note-taking cycle — drop any
-        // leftover input from a previously saved note in this tooltip.
-        tooltip.querySelector(".selection-note-input")?.remove();
-        tooltip.style.flexWrap = "";
 
         // Set the final coordinates while the toolbar is still hidden. If it
         // becomes visible first, Chrome paints it at its default left edge for
@@ -1871,83 +1732,6 @@ function setupExplainFeature() {
       tooltip.style.display = "none";
       await showExplanation(selectedText);
     });
-
-  // Save the exact selected words at the first selected transcript row. This
-  // action does not move playback and does not ask the AI to rewrite the text.
-  tooltip
-    .querySelector(".selection-note-btn")
-    .addEventListener("click", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!selectedText || !currentVideoId) return;
-
-      const button = event.currentTarget;
-      const originalText = button.textContent;
-      button.textContent = "Saving...";
-      button.disabled = true;
-
-      try {
-        const result = await chrome.runtime.sendMessage({
-          action: "saveNote",
-          videoId: currentVideoId,
-          timestamp: selectedTimestamp,
-          videoTitle: currentVideoTitle,
-          channelName: currentChannelName,
-          selectedText,
-        });
-
-        if (!result?.success) {
-          throw new Error(result?.error || "Could not save note");
-        }
-
-        button.textContent = "Saved";
-        loadNotes(currentVideoId);
-        showSelectionNoteInput(tooltip, result.note);
-        setTimeout(() => {
-          button.textContent = originalText;
-          button.disabled = false;
-        }, 900);
-      } catch (error) {
-        console.error("[YouTube Digest] Save selected note error:", error);
-        button.textContent = "Error";
-        setTimeout(() => {
-          button.textContent = originalText;
-          button.disabled = false;
-        }, 1500);
-      }
-    });
-}
-
-/**
- * Shows an inline textarea in the selection toolbar so the user can attach
- * their own thought to a note just saved from selected transcript text.
- * Saved on blur via the updateNote action, keyed to the note's id. The
- * tooltip is left open (dismissed by the existing outside-click handler)
- * so there's time to type before it disappears.
- */
-function showSelectionNoteInput(tooltip, note) {
-  if (!note?.id) return;
-
-  tooltip.querySelector(".selection-note-input")?.remove();
-
-  const textarea = document.createElement("textarea");
-  textarea.className = "selection-note-input";
-  textarea.placeholder = "Add your thought…";
-
-  textarea.addEventListener("blur", async () => {
-    try {
-      await chrome.runtime.sendMessage({
-        action: "updateNote",
-        noteId: note.id,
-        userNote: textarea.value,
-      });
-    } catch (error) {
-      console.error("[YouTube Digest] Update note error:", error);
-    }
-  });
-
-  tooltip.appendChild(textarea);
-  tooltip.style.flexWrap = "wrap";
 }
 
 /**
@@ -2053,7 +1837,6 @@ async function saveToCache(videoId) {
     }
 
     const cacheData = {
-      analysis: currentAnalysis, // May be null if not yet analyzed
       transcript: currentTranscript,
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
@@ -2065,12 +1848,12 @@ async function saveToCache(videoId) {
       timestamp: Date.now(),
     };
 
+    // The Chat feature (background.js's handleChatWithTranscript) reads this
+    // same digest_<videoId> entry directly from storage for its
+    // transcriptTimestamped grounding, so this key must keep being written
+    // here even though nothing else in this file reads it back for analysis.
     await chrome.storage.local.set({ [`digest_${videoId}`]: cacheData });
-    debugLog(
-      "Saved to cache:",
-      videoId,
-      currentAnalysis ? "(with analysis)" : "(transcript only)",
-    );
+    debugLog("Saved to cache:", videoId);
 
     // Evict old entries if we have more than 20 videos cached
     await evictOldCacheEntries(20);
@@ -2158,252 +1941,843 @@ async function updateCache() {
 }
 
 // ============================================================
-// NOTES
+// NOTEBOOK — one freeform document per video
 // ============================================================
+// Replaces the old per-quote note-card system. A single textarea holds raw
+// text (no Markdown rendering yet); edits autosave on a debounce so we don't
+// write to storage on every keystroke.
 
 /**
- * Loads and renders notes from storage.
- * @param {string|null} videoId - Filter by video ID, or null for all notes
+ * Loads the current video's notebook into the textarea. Guards against a
+ * stale response landing after the user has already switched videos.
  */
-async function loadNotes(videoId) {
+async function loadNotebook(videoId) {
+  const textarea = document.getElementById("notebookTextarea");
+  if (!textarea) return;
+
   try {
     const result = await chrome.runtime.sendMessage({
-      action: "getNotes",
-      videoId: videoId,
+      action: "getNotebook",
+      videoId,
     });
-
-    if (result.success) {
-      currentNotes = result.notes || [];
-      currentNotesFilterVideoId = videoId;
-      renderNotes(result.notes, videoId);
-    }
+    if (videoId !== currentVideoId) return; // user moved on while this was in flight
+    textarea.value = result?.notebook?.content || "";
+    currentNotebookSync = result?.notebook?.driveFileId
+      ? {
+          driveFileId: result.notebook.driveFileId,
+          driveFileUrl: result.notebook.driveFileUrl || null,
+          lastSyncedAt: result.notebook.lastSyncedAt || null,
+        }
+      : null;
+    renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_IDLE);
+    renderHighlightOverlay(); // Correct before the user has typed anything.
   } catch (error) {
-    console.error("[YouTube Digest Panel] Load notes error:", error);
+    console.error("[YouTube Digest Panel] Load notebook error:", error);
   }
 }
 
 /**
- * Builds one note's DOM element, wired up with all of its actions. Shared by
- * renderNotes() (full list) and the noteSaved patching below (single note),
- * so a note-item is only ever assembled in one place.
+ * Debounces autosave so we write to storage well after the user pauses
+ * typing, not on every keystroke. The video ID and content are captured now
+ * (not re-read when the timer fires), so a pending save always lands on the
+ * video it was typed against even if the user switches videos in between.
+ *
+ * The highlight overlay, unlike the save itself, re-renders on every input
+ * event with no debounce — it's a cheap string pass over already-in-memory
+ * text, not a storage write.
  */
-function createNoteElement(note, index, filteredVideoId) {
-  const translationId = getNoteTranslationId(note, index);
-  const noteEl = document.createElement("div");
-  noteEl.className = "note-item";
-  noteEl.dataset.noteId = note.id;
-  noteEl.innerHTML = `
-      <div class="note-header">
-        <span class="note-timestamp" data-url="${escapeHtml(note.timestampedUrl)}" data-seconds="${Number(note.timestampSeconds) || 0}">${escapeHtml(note.timestamp)}</span>
-        ${!filteredVideoId ? `<span class="note-video-title">${escapeHtml(note.videoTitle)}</span>` : ""}
-      </div>
-      <div class="note-text">${renderLocalizedContent(note.text, "notes", translationId)}</div>
-      <textarea class="note-user-note-input" placeholder="Add your thought…">${escapeHtml(note.userNote || "")}</textarea>
-      <div class="note-actions">
-        <button class="note-action-btn note-copy-text">Copy text</button>
-        <button class="note-action-btn note-copy-link" data-url="${escapeHtml(note.timestampedUrl)}">Copy timestamp</button>
-        <button class="note-action-btn note-play" data-seconds="${Number(note.timestampSeconds) || 0}">Play</button>
-        <button class="note-delete" data-id="${escapeHtml(note.id)}" type="button" aria-label="Delete note" title="Delete note">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M3 6h18"></path>
-            <path d="M8 6V4h8v2"></path>
-            <path d="m19 6-1 14H6L5 6"></path>
-            <path d="M10 11v5"></path>
-            <path d="M14 11v5"></path>
-          </svg>
-        </button>
-      </div>
-  `;
+function scheduleNotebookSave() {
+  renderHighlightOverlay();
 
-  // Timestamp click - play from this point (in this tab or a new one)
-  noteEl.querySelector(".note-timestamp").addEventListener("click", () => {
-    playNote(note);
-  });
+  const textarea = document.getElementById("notebookTextarea");
+  if (!textarea || !currentVideoId) return;
 
-  // User's own thought on this note — saved on blur
-  noteEl
-    .querySelector(".note-user-note-input")
-    .addEventListener("blur", async (e) => {
-      try {
-        await chrome.runtime.sendMessage({
-          action: "updateNote",
-          noteId: note.id,
-          userNote: e.target.value,
-        });
-      } catch (error) {
-        console.error("[YouTube Digest Panel] Update note error:", error);
-      }
-    });
-
-  // Delete button
-  noteEl.querySelector(".note-delete").addEventListener("click", async (e) => {
-    e.stopPropagation();
-    await deleteNote(note.id);
-    loadNotes(filteredVideoId);
-  });
-
-  // Copy text button — copies just the note's text
-  noteEl
-    .querySelector(".note-copy-text")
-    .addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(
-          getLocalizedPlainText(note.text, "notes", translationId),
-        );
-        const btn = noteEl.querySelector(".note-copy-text");
-        btn.textContent = "Copied";
-        setTimeout(() => {
-          btn.textContent = "Copy text";
-        }, 2000);
-      } catch (err) {
-        console.error("Copy failed:", err);
-      }
-    });
-
-  // Copy timestamp button — copies the timestamped YouTube link
-  noteEl
-    .querySelector(".note-copy-link")
-    .addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(note.timestampedUrl);
-        const btn = noteEl.querySelector(".note-copy-link");
-        btn.textContent = "Copied";
-        setTimeout(() => {
-          btn.textContent = "Copy timestamp";
-        }, 2000);
-      } catch (err) {
-        console.error("Copy failed:", err);
-      }
-    });
-
-  // Play button (in this tab if it's the current video, else a new tab)
-  noteEl.querySelector(".note-play").addEventListener("click", () => {
-    playNote(note);
-  });
-
-  return noteEl;
+  const videoId = currentVideoId;
+  const content = textarea.value;
+  clearTimeout(notebookSaveTimer);
+  notebookSaveTimer = setTimeout(() => {
+    notebookSaveTimer = null;
+    void saveNotebook(videoId, content);
+  }, NOTEBOOK_SAVE_DEBOUNCE_MS);
 }
 
-/**
- * Renders the notes list in the Notes tab.
- */
-function renderNotes(notes, filteredVideoId) {
-  const notesList = document.getElementById("notesList");
-  const notesIntro = document.getElementById("notesIntro");
-
-  if (!notesList) return;
-
-  notesList.innerHTML = "";
-
-  if (!notes || notes.length === 0) {
-    notesIntro.style.display = "block";
-    notesIntro.textContent = filteredVideoId
-      ? "No notes for this video yet. Hover over the video and click Note to save."
-      : "No notes saved yet. Hover over a video and click Note to save.";
-    return;
-  }
-
-  notesIntro.style.display = "none";
-
-  notes.forEach((note, index) => {
-    notesList.appendChild(createNoteElement(note, index, filteredVideoId));
-  });
-
-  if (currentTranscriptMode !== "original" && resultTabIsActive("notes")) {
-    void translateNotesContent();
-  }
-}
-
-/**
- * Handles a "noteSaved" broadcast (fired after any of saveNote/updateNote)
- * while the Notes tab's list is loaded. A different note being saved or
- * updated elsewhere (the player toast, a quote card, the transcript
- * selection toolbar) must not force a full list re-render — that would tear
- * down and rebuild every note-item, silently discarding whatever the user
- * is mid-typing into any OTHER note's own thought textarea here.
- */
-function handleNoteSavedBroadcast(updatedNote, targetVideoId) {
-  if (!updatedNote || currentNotesFilterVideoId !== targetVideoId) {
-    loadNotes(targetVideoId);
-    return;
-  }
-
-  const existingIndex = currentNotes.findIndex((n) => n.id === updatedNote.id);
-
-  if (existingIndex !== -1) {
-    currentNotes[existingIndex] = updatedNote;
-    patchNoteElement(updatedNote, existingIndex, targetVideoId);
-    return;
-  }
-
-  // A brand-new note (from saveNote). Only splice it into this rendered
-  // list if it actually belongs in the current filter.
-  if (targetVideoId && updatedNote.videoId !== targetVideoId) return;
-
-  currentNotes.unshift(updatedNote);
-  insertNoteElementAtTop(updatedNote, targetVideoId);
-}
-
-/**
- * Replaces exactly one note's DOM element in place, leaving every other
- * note-item — and anything focused inside it — completely untouched. If the
- * user happens to be actively editing THIS SAME note's thought textarea
- * right now (a rare cross-surface collision), their in-progress text and
- * caret position are preserved rather than overwritten by the incoming value.
- */
-function patchNoteElement(note, index, filteredVideoId) {
-  const notesList = document.getElementById("notesList");
-  if (!notesList) return;
-
-  const existingEl = Array.from(notesList.children).find(
-    (el) => el.dataset.noteId === note.id,
-  );
-  if (!existingEl) return;
-
-  const ownInput = existingEl.querySelector(".note-user-note-input");
-  const wasFocused = ownInput && document.activeElement === ownInput;
-  const inProgressValue = wasFocused ? ownInput.value : null;
-
-  const newEl = createNoteElement(note, index, filteredVideoId);
-
-  if (wasFocused) {
-    const newInput = newEl.querySelector(".note-user-note-input");
-    newInput.value = inProgressValue;
-    existingEl.replaceWith(newEl);
-    newInput.focus();
-    newInput.setSelectionRange(inProgressValue.length, inProgressValue.length);
-  } else {
-    existingEl.replaceWith(newEl);
-  }
-}
-
-/**
- * Inserts a newly-saved note's element at the top of the list (notes are
- * always newest-first) without touching any existing note-item.
- */
-function insertNoteElementAtTop(note, filteredVideoId) {
-  const notesList = document.getElementById("notesList");
-  const notesIntro = document.getElementById("notesIntro");
-  if (!notesList) return;
-
-  if (notesIntro) notesIntro.style.display = "none";
-  notesList.insertBefore(
-    createNoteElement(note, 0, filteredVideoId),
-    notesList.firstChild,
-  );
-}
-
-/**
- * Deletes a note by ID.
- */
-async function deleteNote(noteId) {
+async function saveNotebook(videoId, content) {
   try {
     await chrome.runtime.sendMessage({
-      action: "deleteNote",
-      noteId: noteId,
+      action: "saveNotebook",
+      videoId,
+      content,
+      videoTitle: currentVideoTitle,
+      channelName: currentChannelName,
     });
   } catch (error) {
-    console.error("[YouTube Digest Panel] Delete note error:", error);
+    console.error("[YouTube Digest Panel] Save notebook error:", error);
+  }
+}
+
+/**
+ * Saves immediately, bypassing the debounce timer — used right before the
+ * panel closes so the last few keystrokes aren't lost.
+ */
+function flushNotebookSave() {
+  if (!notebookSaveTimer) return Promise.resolve();
+  clearTimeout(notebookSaveTimer);
+  notebookSaveTimer = null;
+  const textarea = document.getElementById("notebookTextarea");
+  if (!textarea || !currentVideoId) return Promise.resolve();
+  return saveNotebook(currentVideoId, textarea.value);
+}
+
+// ------------------------------------------------------------
+// Export — Download (local .md file) and Save to Drive
+// ------------------------------------------------------------
+// Both outputs share the same content-assembly logic in notebook-export.js
+// (YTD_NOTEBOOK_EXPORT): the frontmatter block is built only at export time
+// and never touches the textarea or the stored `content` field.
+
+/**
+ * Builds a { videoId, videoTitle, channelName, content } notebook object
+ * from current in-memory state, for the export helpers below. Uses the live
+ * textarea value rather than the last autosaved copy so an export always
+ * reflects exactly what's on screen, even mid-debounce.
+ */
+function currentNotebookForExport() {
+  const textarea = document.getElementById("notebookTextarea");
+  return {
+    videoId: currentVideoId,
+    videoTitle: currentVideoTitle,
+    channelName: currentChannelName,
+    content: textarea?.value || "",
+  };
+}
+
+/**
+ * Downloads the current notebook as a local .md file via chrome.downloads —
+ * a fast, one-click export with no OAuth, no network call, and no special
+ * permission prompt beyond the "downloads" permission declared in the
+ * manifest.
+ */
+function downloadNotebookExport() {
+  if (!currentVideoId) return;
+
+  const notebook = currentNotebookForExport();
+  const markdown = YTD_NOTEBOOK_EXPORT.buildNotebookExportMarkdown(notebook);
+  const filename = YTD_NOTEBOOK_EXPORT.buildExportFilename(notebook);
+
+  const blob = new Blob([markdown], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  let revoked = false;
+  const revokeOnce = () => {
+    if (revoked) return;
+    revoked = true;
+    URL.revokeObjectURL(url);
+  };
+
+  chrome.downloads.download({ url, filename, saveAs: false }, (downloadId) => {
+    if (chrome.runtime.lastError || !downloadId) {
+      console.error(
+        "[YouTube Digest Panel] Notebook download error:",
+        chrome.runtime.lastError,
+      );
+      revokeOnce();
+      showNotebookHotkeyMessage("Couldn't start the download");
+      return;
+    }
+    // Revoke once Chrome reports a terminal state, with a short-timeout
+    // fallback in case onChanged never fires for this download.
+    const onChanged = (delta) => {
+      if (delta.id !== downloadId || !delta.state) return;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      revokeOnce();
+    };
+    chrome.downloads.onChanged.addListener(onChanged);
+    setTimeout(revokeOnce, 5000);
+  });
+}
+
+/**
+ * Turns an exportNotebookToDrive failure into the message shown near the
+ * buttons. Branches on .code the way chatErrorMessage does for chat errors.
+ */
+function driveSyncErrorMessage(result) {
+  if (result?.code === "NOTEBOOK_NOT_FOUND") {
+    return "Write something in the notebook before saving to Drive.";
+  }
+  if (result?.code === "DRIVE_AUTH_FAILED") {
+    return (
+      result.error ||
+      "Google Drive authorization failed. Please try again and approve access."
+    );
+  }
+  if (result?.code === "DRIVE_QUOTA_EXCEEDED") {
+    return result.error || "Google Drive storage quota exceeded.";
+  }
+  return result?.error || "Couldn't save to Google Drive. Please try again.";
+}
+
+function formatRelativeSyncTime(timestamp) {
+  const minutes = Math.max(0, Math.round((Date.now() - timestamp) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+// The three mutually exclusive states the status line can show. Every
+// render explicitly picks one, so a leftover "Synced 2 min ago" from a
+// prior success can never still be showing during a new in-progress or
+// failed attempt — see saveNotebookToDrive.
+const NOTEBOOK_SYNC_STATUS_MODE_IDLE = "idle";
+const NOTEBOOK_SYNC_STATUS_MODE_PENDING = "pending";
+const NOTEBOOK_SYNC_STATUS_MODE_ERROR = "error";
+
+/**
+ * Renders the small persistent status line near the export buttons. Always
+ * called with an explicit mode so a stale state from a previous attempt is
+ * never left on screen (see saveNotebookToDrive):
+ *   - "idle": the durable sync state — hidden if never synced, otherwise
+ *     "Synced X ago" with a link, recomputed fresh from currentNotebookSync
+ *     each call (not a string frozen at the moment of the last success).
+ *   - "pending": a distinct "Saving…" state shown the instant a save starts.
+ *   - "error": a distinct error message, visually different from success
+ *     (see .notebook-sync-status-error / -pending in sidepanel.css).
+ */
+function renderNotebookSyncStatus(mode, message) {
+  const el = document.getElementById("notebookSyncStatus");
+  if (!el) return;
+
+  el.textContent = "";
+  el.classList.toggle("notebook-sync-status-error", mode === NOTEBOOK_SYNC_STATUS_MODE_ERROR);
+  el.classList.toggle("notebook-sync-status-pending", mode === NOTEBOOK_SYNC_STATUS_MODE_PENDING);
+
+  if (mode === NOTEBOOK_SYNC_STATUS_MODE_PENDING) {
+    el.textContent = "Saving…";
+    el.hidden = false;
+    return;
+  }
+
+  if (mode === NOTEBOOK_SYNC_STATUS_MODE_ERROR) {
+    el.textContent = message;
+    el.hidden = false;
+    return;
+  }
+
+  if (!currentNotebookSync?.lastSyncedAt) {
+    el.hidden = true;
+    return;
+  }
+
+  el.hidden = false;
+  el.append(`Synced ${formatRelativeSyncTime(currentNotebookSync.lastSyncedAt)}`);
+  if (currentNotebookSync.driveFileUrl) {
+    el.append(" — ");
+    const link = document.createElement("a");
+    link.href = currentNotebookSync.driveFileUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "Open in Drive";
+    el.append(link);
+  }
+}
+
+/**
+ * Re-renders the "Synced X ago" label on a timer so it keeps advancing
+ * while the panel stays open, instead of freezing at whatever it said the
+ * moment the save succeeded. Only touches the idle state — never
+ * interrupts an in-progress "Saving…" or a currently shown error.
+ */
+function tickNotebookSyncStatusLabel() {
+  const el = document.getElementById("notebookSyncStatus");
+  if (!el || el.hidden) return;
+  if (el.classList.contains("notebook-sync-status-error")) return;
+  if (el.classList.contains("notebook-sync-status-pending")) return;
+  renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_IDLE);
+}
+
+/**
+ * Uploads/updates the current notebook in Google Drive via background.js's
+ * exportNotebookToDrive. Flushes any pending autosave first so the export
+ * always reflects the latest edits, then guards against the user switching
+ * videos while either the flush or the network round-trip is in flight —
+ * the same pattern sendChatMessage uses for its own in-flight request.
+ */
+async function saveNotebookToDrive() {
+  if (!currentVideoId || notebookDriveSyncInFlight) return;
+  const videoId = currentVideoId;
+
+  // Clear any prior success/error text immediately — before the flush or
+  // the network round-trip even starts — so a new attempt never shows
+  // stale text from the last one.
+  renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_PENDING);
+
+  await flushNotebookSave();
+  if (videoId !== currentVideoId) return;
+
+  const button = document.getElementById("notebookSaveToDriveBtn");
+  notebookDriveSyncInFlight = true;
+  if (button) button.disabled = true;
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: "exportNotebookToDrive",
+      videoId,
+    });
+    if (videoId !== currentVideoId) return;
+
+    if (result?.success) {
+      currentNotebookSync = {
+        driveFileId: result.driveFileId,
+        driveFileUrl: result.driveFileUrl || null,
+        lastSyncedAt: result.lastSyncedAt,
+      };
+      renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_IDLE);
+    } else {
+      renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_ERROR, driveSyncErrorMessage(result));
+    }
+  } catch (error) {
+    if (videoId === currentVideoId) {
+      renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_ERROR, `Error: ${error.message}`);
+    }
+  } finally {
+    notebookDriveSyncInFlight = false;
+    if (button && videoId === currentVideoId) button.disabled = false;
+  }
+}
+
+// ------------------------------------------------------------
+// Drive export folder — a dropdown of folders THIS EXTENSION created
+// ------------------------------------------------------------
+// drive.file only grants access to files/folders the app itself created, so
+// there is no scope-compatible way to browse the user's pre-existing Drive
+// folders from here. Instead, this offers a dropdown of folders the
+// extension has created (via background.js's createDriveFolder), plus a
+// "+ New folder…" entry that creates one on the spot.
+
+const DRIVE_FOLDER_NEW_OPTION = "__new_folder__";
+const DRIVE_FOLDER_ROOT_OPTION = "";
+
+/**
+ * Rebuilds the <select> options from driveFolderList/currentDriveFolder.
+ * Called after every load, create, or selection change so the control
+ * always reflects the actual stored state (e.g. reverting the dropdown if
+ * "+ New folder…" was cancelled).
+ */
+function renderDriveFolderOptions() {
+  const select = document.getElementById("notebookDriveFolderSelect");
+  if (!select) return;
+
+  const options = [
+    `<option value="${DRIVE_FOLDER_ROOT_OPTION}">My Drive (root)</option>`,
+    ...driveFolderList.map(
+      (folder) =>
+        `<option value="${escapeHtml(folder.id)}">${escapeHtml(folder.name)}</option>`,
+    ),
+    `<option value="${DRIVE_FOLDER_NEW_OPTION}">+ New folder…</option>`,
+  ];
+  select.innerHTML = options.join("");
+  select.value = currentDriveFolder?.id || DRIVE_FOLDER_ROOT_OPTION;
+}
+
+/**
+ * Persists a new default export folder (or null for "My Drive (root)").
+ * Takes effect on the next export of any notebook — a new file lands there,
+ * and an already-exported file gets moved there — see
+ * handleExportNotebookToDrive in background.js.
+ */
+async function applyDefaultDriveFolder(folder) {
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: "setDriveFolder",
+      folder,
+    });
+    if (result?.success) {
+      currentDriveFolder = result.folder;
+    } else {
+      renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_ERROR, driveSyncErrorMessage(result));
+    }
+  } catch (error) {
+    console.error("[YouTube Digest Panel] Set Drive folder error:", error);
+    renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_ERROR, `Error: ${error.message}`);
+  } finally {
+    renderDriveFolderOptions();
+  }
+}
+
+/**
+ * Creates a new Drive folder via background.js (same authenticated access
+ * already used for exporting — no Picker, no extra scope), adds it to the
+ * in-memory folder list, and makes it the new default.
+ */
+async function createAndSelectDriveFolder(name) {
+  const select = document.getElementById("notebookDriveFolderSelect");
+  if (select) select.disabled = true;
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: "createDriveFolder",
+      name,
+    });
+    if (!result?.success) {
+      renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_ERROR, driveSyncErrorMessage(result));
+      renderDriveFolderOptions();
+      return;
+    }
+    driveFolderList = [...driveFolderList, result.folder];
+    await applyDefaultDriveFolder(result.folder);
+  } catch (error) {
+    console.error("[YouTube Digest Panel] Create Drive folder error:", error);
+    renderNotebookSyncStatus(NOTEBOOK_SYNC_STATUS_MODE_ERROR, `Error: ${error.message}`);
+    renderDriveFolderOptions();
+  } finally {
+    if (select) select.disabled = false;
+  }
+}
+
+/**
+ * Handles a change on the folder <select>: "+ New folder…" prompts for a
+ * name and creates it; any other option applies that folder (or root, for
+ * the empty value) as the new default. Cancelling the prompt reverts the
+ * dropdown without changing anything.
+ */
+async function handleDriveFolderSelectChange(event) {
+  const value = event.target.value;
+
+  if (value === DRIVE_FOLDER_NEW_OPTION) {
+    const name = window.prompt("Name the new Drive folder:");
+    if (!name || !name.trim()) {
+      renderDriveFolderOptions(); // revert to the actual current selection
+      return;
+    }
+    await createAndSelectDriveFolder(name.trim());
+    return;
+  }
+
+  const folder = value ? driveFolderList.find((item) => item.id === value) || null : null;
+  await applyDefaultDriveFolder(folder);
+}
+
+/**
+ * Loads the global default Drive folder and the list of extension-created
+ * folders once at panel startup — not per-video, unlike loadNotebook.
+ */
+async function loadDriveFolderSetting() {
+  try {
+    const [folderResult, listResult] = await Promise.all([
+      chrome.runtime.sendMessage({ action: "getDriveFolder" }),
+      chrome.runtime.sendMessage({ action: "listDriveFolders" }),
+    ]);
+    currentDriveFolder = folderResult?.folder || null;
+    driveFolderList = listResult?.folders || [];
+  } catch (error) {
+    console.error("[YouTube Digest Panel] Load Drive folder settings error:", error);
+  }
+  renderDriveFolderOptions();
+}
+
+// ------------------------------------------------------------
+// Markdown formatting shortcuts (Ctrl/Cmd+B, Ctrl/Cmd+I, Ctrl/Cmd+Shift+8)
+// ------------------------------------------------------------
+// These insert literal Markdown characters into the plain textarea — there
+// is no rendered/rich-text view. The string logic below is pure (no DOM) so
+// it can be unit tested; the keydown handler just wires it to the textarea.
+
+/**
+ * Toggles a symmetric marker (e.g. "**" for bold, "*" for italic) around the
+ * current selection. If the selection is exactly bounded by the marker on
+ * both sides already, the markers are removed instead of adding another
+ * pair. Anything more ambiguous than that exact-bounded case (partial
+ * overlap, nested markers) is intentionally not special-cased — it just
+ * wraps again, per the no-full-parser scope of this feature.
+ * With no selection, an empty marker pair is inserted with the cursor
+ * placed between the two markers.
+ */
+function toggleInlineMarker(text, selectionStart, selectionEnd, marker) {
+  const markerLen = marker.length;
+  const before = text.slice(0, selectionStart);
+  const selected = text.slice(selectionStart, selectionEnd);
+  const after = text.slice(selectionEnd);
+
+  const isExactlyBounded =
+    before.slice(-markerLen) === marker && after.slice(0, markerLen) === marker;
+
+  if (isExactlyBounded) {
+    const newText =
+      before.slice(0, before.length - markerLen) + selected + after.slice(markerLen);
+    return {
+      text: newText,
+      selectionStart: selectionStart - markerLen,
+      selectionEnd: selectionEnd - markerLen,
+    };
+  }
+
+  const newText = before + marker + selected + marker + after;
+  if (selectionStart === selectionEnd) {
+    const cursor = selectionStart + markerLen;
+    return { text: newText, selectionStart: cursor, selectionEnd: cursor };
+  }
+  return {
+    text: newText,
+    selectionStart: selectionStart + markerLen,
+    selectionEnd: selectionEnd + markerLen,
+  };
+}
+
+/**
+ * Toggles a "- " bullet prefix on every line touched by the selection
+ * (extended to whole lines first, same as Google Docs/Word). If every
+ * non-empty touched line is already bulleted, the prefix is removed from
+ * each; otherwise it's added to each line that doesn't already have it.
+ * Blank lines are left untouched either way. Selection bounds are remapped
+ * to keep tracking the same original text as lines shift.
+ */
+function toggleBulletPrefix(text, selectionStart, selectionEnd) {
+  const BULLET = "- ";
+
+  const rangeStart = text.lastIndexOf("\n", selectionStart - 1) + 1;
+  let rangeEnd = text.indexOf("\n", selectionEnd);
+  if (rangeEnd === -1) rangeEnd = text.length;
+
+  const before = text.slice(0, rangeStart);
+  const after = text.slice(rangeEnd);
+  const lines = text.slice(rangeStart, rangeEnd).split("\n");
+
+  const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
+  const shouldRemove =
+    nonEmptyLines.length > 0 &&
+    nonEmptyLines.every((line) => line.startsWith(BULLET));
+
+  let oldAbs = rangeStart;
+  let newAbs = rangeStart;
+  let newSelectionStart = null;
+  let newSelectionEnd = null;
+  const newLines = lines.map((line, index) => {
+    const isLast = index === lines.length - 1;
+    const lineOldStart = oldAbs;
+    const lineOldEnd = lineOldStart + line.length;
+    const isEmpty = line.trim().length === 0;
+    const hasPrefix = line.startsWith(BULLET);
+
+    let newLine = line;
+    if (!isEmpty) {
+      if (shouldRemove && hasPrefix) newLine = line.slice(BULLET.length);
+      else if (!shouldRemove && !hasPrefix) newLine = BULLET + line;
+    }
+
+    const mapLocal = (localOffset) => {
+      if (isEmpty) return localOffset;
+      if (shouldRemove && hasPrefix) {
+        return Math.max(0, localOffset - BULLET.length);
+      }
+      if (!shouldRemove && !hasPrefix) {
+        return localOffset + BULLET.length;
+      }
+      return localOffset;
+    };
+
+    if (selectionStart >= lineOldStart && selectionStart <= lineOldEnd) {
+      newSelectionStart = newAbs + mapLocal(selectionStart - lineOldStart);
+    }
+    if (selectionEnd >= lineOldStart && selectionEnd <= lineOldEnd) {
+      newSelectionEnd = newAbs + mapLocal(selectionEnd - lineOldStart);
+    }
+
+    oldAbs = lineOldEnd + 1; // skip the "\n"
+    newAbs += newLine.length + (isLast ? 0 : 1);
+    return newLine;
+  });
+
+  return {
+    text: before + newLines.join("\n") + after,
+    selectionStart: newSelectionStart ?? selectionStart,
+    selectionEnd: newSelectionEnd ?? selectionEnd,
+  };
+}
+
+/**
+ * Applies a toggle*'s result to the live textarea, then manually dispatches
+ * an "input" event — setting .value programmatically does NOT fire one
+ * natively, and the autosave listener (see scheduleNotebookSave) only
+ * listens for "input". Without this, formatting shortcuts would silently
+ * fail to autosave until the next real keystroke.
+ */
+function applyNotebookShortcutResult(textarea, result) {
+  textarea.value = result.text;
+  textarea.setSelectionRange(result.selectionStart, result.selectionEnd);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+/**
+ * Handles the notebook's Markdown formatting shortcuts, plus the
+ * Ctrl/Cmd+Shift+Q quote-insert hotkey. Scoped to keydown on the notebook
+ * textarea only (attached directly to it, not the document), so these
+ * bindings can't fire from anywhere else in the panel. (Ctrl+N is
+ * deliberately not used — Chrome reserves it for opening a new window.)
+ */
+function handleNotebookShortcutKeydown(event) {
+  const textarea = event.currentTarget;
+  const withModifier = event.ctrlKey || event.metaKey;
+  if (!withModifier) return;
+
+  if (event.shiftKey && event.code === "KeyQ") {
+    event.preventDefault();
+    void insertQuoteAtCursor(textarea);
+    return;
+  }
+
+  let result = null;
+  if (!event.shiftKey && event.code === "KeyB") {
+    result = toggleInlineMarker(
+      textarea.value,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+      "**",
+    );
+  } else if (!event.shiftKey && event.code === "KeyI") {
+    result = toggleInlineMarker(
+      textarea.value,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+      "*",
+    );
+  } else if (event.shiftKey && event.code === "Digit8") {
+    result = toggleBulletPrefix(
+      textarea.value,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+    );
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  applyNotebookShortcutResult(textarea, result);
+}
+
+const NOTEBOOK_HOTKEY_MESSAGE_MS = 2500;
+let notebookHotkeyMessageTimer = null;
+
+/**
+ * Shows a brief inline message near the notebook (e.g. when the quote-insert
+ * hotkey can't find a matching transcript line), clearing itself after a
+ * couple of seconds. Not a browser alert, not the old page-level toast.
+ */
+function showNotebookHotkeyMessage(message) {
+  const el = document.getElementById("notebookHotkeyMessage");
+  if (!el) return;
+  el.textContent = message;
+  el.hidden = false;
+  clearTimeout(notebookHotkeyMessageTimer);
+  notebookHotkeyMessageTimer = setTimeout(() => {
+    el.hidden = true;
+  }, NOTEBOOK_HOTKEY_MESSAGE_MS);
+}
+
+/**
+ * Splices a cited-quote block into `text` at `cursorPos`. Pure — no DOM, no
+ * chrome.* calls. If the cursor isn't already at the start of a line, a
+ * leading newline is added first so the block doesn't run into existing
+ * text. The returned selection lands on the blank reaction line right after
+ * the segment-id comment, ready for the user's own thought.
+ */
+function buildQuoteInsertion(text, cursorPos, segmentText, timestampLabel, segmentId) {
+  const atLineStart = cursorPos === 0 || text[cursorPos - 1] === "\n";
+  const leadingNewline = atLineStart ? "" : "\n";
+  const block = `${leadingNewline}> [${timestampLabel}] ${segmentText}\n<!-- ${segmentId} -->\n\n`;
+
+  const before = text.slice(0, cursorPos);
+  const after = text.slice(cursorPos);
+  const cursor = before.length + block.length;
+
+  return {
+    text: before + block + after,
+    selectionStart: cursor,
+    selectionEnd: cursor,
+  };
+}
+
+/**
+ * Handles Ctrl/Cmd+Shift+Q: captures the transcript line at the current
+ * playback position and inserts it as a cited quote at the cursor, with a
+ * blank line left for the user's own reaction.
+ *
+ * Reuses the exact same current-time path (fetchCurrentPlaybackTime) and
+ * segment-matching rule (findActiveSegmentIndex) as playback tracking — no
+ * new relay mechanism, no new segment matcher. A paused video's currentTime
+ * is just as citable as a playing one's, so `paused` is not treated as a
+ * failure here — only a missing transcript, no matching segment, or a
+ * timed-out/errored relay surface the "couldn't find" message rather than a
+ * silent no-op or a thrown error.
+ */
+async function insertQuoteAtCursor(textarea) {
+  const segments = getActiveTranscriptSegments();
+  if (!segments.length) {
+    showNotebookHotkeyMessage("Couldn't find the current line");
+    return;
+  }
+
+  let playback = null;
+  try {
+    playback = await fetchCurrentPlaybackTime();
+  } catch (error) {
+    playback = null;
+  }
+
+  if (!playback) {
+    showNotebookHotkeyMessage("Couldn't find the current line");
+    return;
+  }
+
+  const activeIndex = findActiveSegmentIndex(segments, playback.currentTime);
+  if (activeIndex === -1) {
+    showNotebookHotkeyMessage("Couldn't find the current line");
+    return;
+  }
+
+  const segment = segments[activeIndex];
+  const result = buildQuoteInsertion(
+    textarea.value,
+    textarea.selectionStart,
+    segment.text,
+    formatTimestampLabel(segment.start),
+    segment.id,
+  );
+  applyNotebookShortcutResult(textarea, result);
+}
+
+// A quote's own line always looks like "> [MM:SS] quoted text" (see
+// buildQuoteInsertion), and its comment line always looks like
+// "<!-- segment-<index>-<startMs> -->". Both must match for a line to count
+// as an intact quote. This is the one place in the codebase that knows what
+// a quote line looks like — findQuoteLineAtPosition and buildHighlightedHtml
+// both build on extractAllQuotes rather than re-matching lines themselves.
+const QUOTE_LINE_PATTERN = /^> \[(\d+:\d{2})\] (.+)$/;
+const QUOTE_COMMENT_PATTERN = /^<!-- segment-\d+-(\d+) -->$/;
+
+/**
+ * Finds every intact quote in `text`, in document order. Pure — no DOM, no
+ * chrome.* calls. A quote line whose immediately-following line isn't a
+ * valid comment (missing, malformed, or hand-edited by the user) is
+ * skipped — not included, not thrown on.
+ */
+function extractAllQuotes(text) {
+  const quotes = [];
+  let searchStart = 0;
+
+  while (searchStart <= text.length) {
+    let lineEnd = text.indexOf("\n", searchStart);
+    if (lineEnd === -1) lineEnd = text.length;
+    const line = text.slice(searchStart, lineEnd);
+    const quoteMatch = QUOTE_LINE_PATTERN.exec(line);
+
+    if (quoteMatch && lineEnd < text.length) {
+      const commentLineStart = lineEnd + 1;
+      let commentLineEnd = text.indexOf("\n", commentLineStart);
+      if (commentLineEnd === -1) commentLineEnd = text.length;
+      const commentLine = text.slice(commentLineStart, commentLineEnd);
+      const commentMatch = QUOTE_COMMENT_PATTERN.exec(commentLine);
+
+      if (commentMatch) {
+        quotes.push({
+          startMs: Number(commentMatch[1]),
+          timestampLabel: quoteMatch[1],
+          quoteText: quoteMatch[2],
+          lineStart: searchStart,
+          lineEnd,
+          commentLineStart,
+          commentLineEnd,
+        });
+      }
+    }
+
+    if (lineEnd >= text.length) break;
+    searchStart = lineEnd + 1;
+  }
+
+  return quotes;
+}
+
+/**
+ * Detects whether the line containing `position` is an intact quote
+ * inserted by buildQuoteInsertion. Pure — no DOM, no chrome.* calls. Returns
+ * the quote's exact startMs (read from its comment line, not the rounded
+ * [MM:SS] label) or null for any other line — ordinary prose, the blank
+ * reaction line, or a quote whose comment was hand-edited or deleted.
+ */
+function findQuoteLineAtPosition(text, position) {
+  const match = extractAllQuotes(text).find(
+    (quote) => position >= quote.lineStart && position <= quote.lineEnd,
+  );
+  return match ? { startMs: match.startMs } : null;
+}
+
+/**
+ * Builds the notebook's highlight-overlay HTML from the textarea's current
+ * value. Pure with respect to the DOM tree — it never reads or writes the
+ * live page beyond escapeHtml's internal detached element. Every quote line
+ * found by extractAllQuotes is wrapped in a blue .quote-line span, and its
+ * comment line in a muted .quote-meta span; everything else passes through
+ * escaped but unwrapped. Content is always escaped first — this is the one
+ * consistent security convention the rest of the codebase already follows.
+ */
+function buildHighlightedHtml(text) {
+  const quotes = extractAllQuotes(text);
+  if (!quotes.length) return escapeHtml(text);
+
+  let html = "";
+  let cursor = 0;
+
+  for (const quote of quotes) {
+    html += escapeHtml(text.slice(cursor, quote.lineStart));
+
+    const quoteLine = text.slice(quote.lineStart, quote.lineEnd);
+    html += `<span class="quote-line">${escapeHtml(quoteLine)}</span>`;
+
+    // The single newline between the quote line and its comment line.
+    html += escapeHtml(text.slice(quote.lineEnd, quote.commentLineStart));
+
+    const commentLine = text.slice(quote.commentLineStart, quote.commentLineEnd);
+    html += `<span class="quote-meta">${escapeHtml(commentLine)}</span>`;
+
+    cursor = quote.commentLineEnd;
+  }
+
+  html += escapeHtml(text.slice(cursor));
+  return html;
+}
+
+/**
+ * Re-renders the notebook's syntax-highlighting backdrop from the
+ * textarea's current value. Purely visual — the backdrop is aria-hidden and
+ * pointer-events:none; the real <textarea> stays the only interactive
+ * surface. Called on every "input" event and once when a notebook loads.
+ */
+function renderHighlightOverlay() {
+  const backdrop = document.getElementById("notebookHighlightBackdrop");
+  const textarea = document.getElementById("notebookTextarea");
+  if (!backdrop || !textarea) return;
+  backdrop.innerHTML = buildHighlightedHtml(textarea.value);
+}
+
+/**
+ * Ctrl+Click (Cmd+Click on Mac) a quote's [MM:SS] text jumps the video to
+ * that exact moment. Detected purely from the raw text via
+ * findQuoteLineAtPosition — the textarea stays a plain <textarea>; nothing
+ * is rendered as a link, and a plain click (no modifier) is left alone to
+ * do its normal cursor-placement thing.
+ */
+async function handleNotebookQuoteClick(event) {
+  if (!(event.ctrlKey || event.metaKey)) return;
+
+  const textarea = event.currentTarget;
+  // The native click has already moved the caret by the time this fires.
+  const match = findQuoteLineAtPosition(textarea.value, textarea.selectionStart);
+  if (!match) return;
+
+  const success = await seekTo(match.startMs / 1000);
+  if (!success) {
+    showNotebookHotkeyMessage("Couldn't jump to that moment");
   }
 }
 
@@ -2461,23 +2835,83 @@ function stopPlaybackTracking() {
     });
 }
 
+const GET_CURRENT_TIME_TIMEOUT_MS = 4000;
+
+/**
+ * Gets the current YouTube playback time and paused state. Tries direct
+ * messaging to the stored YouTube tab first (fastest/reliable, same as
+ * seekTo), falling back to the relayToContent path through background.js.
+ * Wrapped in a timeout + settled guard, same pattern as
+ * sendTranslationMessage, so a dead service worker or missing YouTube tab
+ * can't hang a caller forever. Resolves null (never throws) for any
+ * ordinary failure to respond; rejects only on the timeout.
+ */
+function fetchCurrentPlaybackTime() {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      callback(value);
+    };
+
+    timeoutId = setTimeout(() => {
+      finish(reject, new Error("Timed out getting the current playback time."));
+    }, GET_CURRENT_TIME_TIMEOUT_MS);
+
+    (async () => {
+      if (youtubeTabId) {
+        try {
+          const response = await chrome.tabs.sendMessage(youtubeTabId, {
+            action: "getCurrentTime",
+          });
+          if (typeof response?.currentTime === "number") {
+            finish(resolve, {
+              currentTime: response.currentTime,
+              paused: Boolean(response.paused),
+            });
+            return;
+          }
+        } catch (directErr) {
+          // Fall through to the relay path below.
+        }
+      }
+
+      try {
+        const result = await chrome.runtime.sendMessage({
+          action: "relayToContent",
+          payload: { action: "getCurrentTime" },
+        });
+        const response = result?.success ? result.response : null;
+        if (typeof response?.currentTime === "number") {
+          finish(resolve, {
+            currentTime: response.currentTime,
+            paused: Boolean(response.paused),
+          });
+        } else {
+          finish(resolve, null);
+        }
+      } catch (relayErr) {
+        finish(resolve, null);
+      }
+    })();
+  });
+}
+
 /**
  * One tick of the playback tracker. Gets current video time from the
  * YouTube tab and highlights + scrolls to the matching transcript entry.
  */
 async function playbackTrackingTick() {
   try {
-    const result = await chrome.runtime.sendMessage({
-      action: "relayToContent",
-      payload: { action: "getCurrentTime" },
-    });
-
-    if (!result.success || !result.response) return;
-
-    const currentTime = result.response.currentTime || 0;
-    highlightActiveEntry(currentTime);
+    const playback = await fetchCurrentPlaybackTime();
+    if (!playback) return;
+    highlightActiveEntry(playback.currentTime);
   } catch (error) {
-    // Silently ignore — YouTube tab might be closed or navigated away
+    // Silently ignore — YouTube tab might be closed or navigated away, or
+    // the request timed out.
   }
 }
 
@@ -2500,6 +2934,24 @@ function scrollToActiveEntry() {
 }
 
 /**
+ * Finds the index of the segment whose time range contains currentSeconds,
+ * given an ascending array of objects with a numeric `start` (matches
+ * groupTranscriptEntries' output). Shared by the playback highlighter below
+ * and the notebook's quote-insert hotkey, so both use one matching rule.
+ */
+function findActiveSegmentIndex(segments, currentSeconds) {
+  let activeIndex = -1;
+  for (let i = 0; i < segments.length; i++) {
+    const start = segments[i].start;
+    const nextStart = i + 1 < segments.length ? segments[i + 1].start : Infinity;
+    if (currentSeconds >= start && currentSeconds < nextStart) {
+      activeIndex = i;
+    }
+  }
+  return activeIndex;
+}
+
+/**
  * Finds the transcript entry matching the current playback time,
  * highlights it, and scrolls to it (if auto-scroll is enabled).
  *
@@ -2512,21 +2964,12 @@ function highlightActiveEntry(currentSeconds) {
   const entries = transcriptList.querySelectorAll(".transcript-entry");
   if (entries.length === 0) return;
 
-  // Find the entry whose time range contains the current playback time
-  let activeEntry = null;
-  entries.forEach((entry, index) => {
-    const entrySeconds = parseInt(entry.dataset.seconds);
-    const nextEntry = entries[index + 1];
-    const nextSeconds = nextEntry
-      ? parseInt(nextEntry.dataset.seconds)
-      : Infinity;
-
-    if (currentSeconds >= entrySeconds && currentSeconds < nextSeconds) {
-      activeEntry = entry;
-    }
-  });
-
-  if (!activeEntry) return;
+  const segments = Array.from(entries, (entry) => ({
+    start: parseInt(entry.dataset.seconds),
+  }));
+  const activeIndex = findActiveSegmentIndex(segments, currentSeconds);
+  if (activeIndex === -1) return;
+  const activeEntry = entries[activeIndex];
 
   // Skip if this entry is already highlighted (no DOM thrashing)
   if (activeEntry.classList.contains("active-playback")) return;
@@ -2772,22 +3215,10 @@ async function handleDisplayLanguageModeChange(mode) {
 
   if (mode === "original") {
     renderTranscript();
-    if (currentAnalysis) renderAnalysisResults(currentAnalysis);
-    if (currentNotes.length) renderNotes(currentNotes, currentNotesFilterVideoId);
     return;
   }
 
-  if (currentAnalysis) {
-    renderAnalysisResults(currentAnalysis);
-  }
-  if (currentNotes.length) {
-    renderNotes(currentNotes, currentNotesFilterVideoId);
-  }
-  if (activeTabName === "overview" && currentAnalysis) {
-    await translateOverviewContent();
-  } else if (activeTabName === "notes" && currentNotes.length) {
-    await translateNotesContent();
-  } else if (activeTabName === "transcript") {
+  if (activeTabName === "transcript") {
     await translateTranscript();
   }
 }
@@ -2829,9 +3260,7 @@ function renderTranscriptModeRows(segments, mode) {
     div.dataset.segmentId = segment.id;
     div.dataset.segmentIndex = index;
 
-    const minutes = Math.floor(segment.start / 60);
-    const seconds = Math.floor(segment.start % 60);
-    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
+    const timestamp = formatTimestampLabel(segment.start);
     div.innerHTML = `
       <span class="transcript-time">${timestamp}</span>
       ${renderTranscriptSegmentContent(segment, mode, cached, "")}
@@ -3094,4 +3523,18 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   getNavigationUrl,
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
+  saveNotebook,
+};
+
+globalThis.__YTD_NOTEBOOK_TESTING__ = {
+  toggleInlineMarker,
+  toggleBulletPrefix,
+  buildQuoteInsertion,
+  findActiveSegmentIndex,
+  formatTimestampLabel,
+  findQuoteLineAtPosition,
+  extractAllQuotes,
+  buildHighlightedHtml,
+  driveSyncErrorMessage,
+  formatRelativeSyncTime,
 };

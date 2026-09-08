@@ -1,15 +1,21 @@
 {
   "manifest_version": 3,
   "name": "YouTube Digest",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxn+pENDZYCzET9mamBmoAKfzX8pqJlwBUukRW3aU9niewnvCq//9RJ+IKV/KK/dhlMWIaCV8Ml9/oJcJ3E6zqsCWzrBk1Ngna0eoltMMx5y4wjsikBJeAMEYV39dnixWJjx5H1jxjI3fCsqWx477zx1p4xqQ/zgGvJPiH6keBavCa9jIFu4k0lJjRi7QngArJONwyKc8SDIxCNWGU34Qiwmji6qIBC8lJUu/PjGJhkxJq55I5Vuz4Klykfbk/wj7xCpdJ1kg2fN1xrH4cH5JRA/SzXI/xsAttO2xj5W/DGkXLg79nb0odDlXEC16SjDN0Zoo3dnINqut2+DzvY23oQIDAQAB",
   "version": "1.2.0",
   "minimum_chrome_version": "116",
   "description": "Turn YouTube videos into learning resources with transcripts, bilingual translation, AI overviews, and notes.",
-  "permissions": ["sidePanel", "storage", "tabs", "scripting"],
+  "permissions": ["sidePanel", "storage", "tabs", "scripting", "downloads", "identity"],
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://api.supadata.ai/*",
-    "https://api.deepseek.com/*"
+    "https://api.deepseek.com/*",
+    "https://www.googleapis.com/*"
   ],
+  "oauth2": {
+    "client_id": "262977451620-7u282p0494rugqd1996vkih2ljbcabto.apps.googleusercontent.com",
+    "scopes": ["https://www.googleapis.com/auth/drive.file"]
+  },
   "action": {
     "default_title": "Open YouTube Digest",
     "default_icon": {

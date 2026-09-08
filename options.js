@@ -487,7 +487,14 @@ const YTD_OPTIONS = (() => {
     }
 
     async function clearNotes() {
-      await storage.remove("ytd_notes");
+      // Notes moved from the single ytd_notes list to one ytd_notebook_<id>
+      // document per video, plus the ytd_notebook_index summary — remove all
+      // of them by prefix, same as clearCachedDigests does for digest_.
+      const all = await storage.get(null);
+      const keys = Object.keys(all).filter((key) =>
+        key.startsWith("ytd_notebook_"),
+      );
+      if (keys.length) await storage.remove(keys);
       setStatus(dataStatus, "notesDeleted");
     }
 

@@ -13,7 +13,7 @@
 
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
-importScripts("settings.js");
+importScripts("settings.js", "notebook-export.js");
 
 const DEBUG = false;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
@@ -356,17 +356,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Keep the message channel open for async response
   }
 
-  if (message.action === "analyzeTranscript") {
-    // Pass video duration to help the AI validate timestamps
-    handleAnalyzeTranscript(
-      message.transcriptText,
-      message.videoTitle,
-      message.channelName,
-      message.videoDescription,
-      message.videoDuration,
-    )
+  if (message.action === "chatWithTranscript") {
+    handleChatWithTranscript(message.videoId, message.messages)
       .then(sendResponse)
-      .catch((err) => sendResponse({ error: err.message }));
+      .catch((err) =>
+        sendResponse({ success: false, error: err.message, code: err.code }),
+      );
     return true;
   }
 
@@ -382,42 +377,74 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.action === "saveNote") {
-    // Save a note at the current timestamp, or save exact selected transcript
-    // text when the side panel supplies it.
-    handleSaveNote(
+  // The old per-quote note-card system (saveNote/getNotes/deleteNote/
+  // updateNote against ytd_notes) is gone in favor of one freeform notebook
+  // document per video. Quote-capture mechanism returns in a later step.
+  if (message.action === "getNotebook") {
+    handleGetNotebook(message.videoId)
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse({ success: false, error: err.message, code: err.code }),
+      );
+    return true;
+  }
+
+  if (message.action === "saveNotebook") {
+    handleSaveNotebook(
       message.videoId,
-      message.timestamp,
+      message.content,
       message.videoTitle,
       message.channelName,
-      message.selectedText,
     )
       .then(sendResponse)
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+      .catch((err) =>
+        sendResponse({ success: false, error: err.message, code: err.code }),
+      );
     return true;
   }
 
-  if (message.action === "getNotes") {
-    // Get all saved notes
-    handleGetNotes(message.videoId)
+  if (message.action === "exportNotebookToDrive") {
+    handleExportNotebookToDrive(message.videoId)
       .then(sendResponse)
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+      .catch((err) =>
+        sendResponse({ success: false, error: err.message, code: err.code }),
+      );
     return true;
   }
 
-  if (message.action === "deleteNote") {
-    // Delete a specific note
-    handleDeleteNote(message.noteId)
+  if (message.action === "getDriveFolder") {
+    handleGetDriveFolder()
       .then(sendResponse)
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+      .catch((err) =>
+        sendResponse({ success: false, error: err.message, code: err.code }),
+      );
     return true;
   }
 
-  if (message.action === "updateNote") {
-    // Update a specific note's userNote field
-    handleUpdateNote(message.noteId, message.userNote)
+  if (message.action === "setDriveFolder") {
+    handleSetDriveFolder(message.folder)
       .then(sendResponse)
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+      .catch((err) =>
+        sendResponse({ success: false, error: err.message, code: err.code }),
+      );
+    return true;
+  }
+
+  if (message.action === "createDriveFolder") {
+    handleCreateDriveFolder(message.name)
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse({ success: false, error: err.message, code: err.code }),
+      );
+    return true;
+  }
+
+  if (message.action === "listDriveFolders") {
+    handleListDriveFolders()
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse({ success: false, error: err.message, code: err.code }),
+      );
     return true;
   }
 
@@ -902,206 +929,6 @@ function parseLooseJson(text) {
 }
 
 // ============================================================
-// DEEPSEEK ANALYSIS
-// ============================================================
-
-/**
- * Sends the transcript to DeepSeek for analysis.
- *
- * The prompt asks the model to produce chapters covering the whole video
- * and 3-5 key quotes with timestamps.
- *
- * @param {string} transcriptText - The full transcript as plain text
- * @param {string} videoTitle - The video title
- * @param {string} channelName - The channel name
- * @returns {Object} - { success, analysis } or { success: false, error }
- */
-async function handleAnalyzeTranscript(
-  transcriptText,
-  videoTitle,
-  channelName,
-  videoDescription,
-  videoDuration,
-) {
-  try {
-    const settings = await getSettings();
-    if (!settings.aiApiKey) {
-      return {
-        success: false,
-        error: "NO_AI_KEY",
-        message: "DeepSeek API key not configured. Open YouTube Digest Settings.",
-      };
-    }
-
-    // Convert duration to MM:SS format for context
-    // The transcript text is already prefixed with [M:SS] markers. Its LAST
-    // marker is the most reliable signal of where the content actually ends —
-    // more trustworthy than the duration metadata, which is sometimes missing
-    // or wrong. We use the larger of (metadata duration, last transcript stamp).
-    let lastTranscriptSeconds = 0;
-    const stampMatches = transcriptText.match(/\[(\d+):(\d{2})\]/g) || [];
-    if (stampMatches.length) {
-      const last =
-        stampMatches[stampMatches.length - 1].match(/\[(\d+):(\d{2})\]/);
-      lastTranscriptSeconds = parseInt(last[1]) * 60 + parseInt(last[2]);
-    }
-
-    const effectiveSeconds = Math.max(
-      Math.floor(videoDuration || 0),
-      lastTranscriptSeconds,
-    );
-    const durationMinutes = Math.floor(effectiveSeconds / 60);
-    const durationSeconds = Math.floor(effectiveSeconds % 60);
-    const durationFormatted = `${durationMinutes}:${String(durationSeconds).padStart(2, "0")}`;
-    const maxTimestampSeconds = effectiveSeconds;
-
-    // The "last chapter must be after" threshold (75% in) forces the model to
-    // cover the WHOLE video instead of front-loading chapters near the start.
-    // We do NOT prescribe a chapter count — the model picks the natural splits.
-    const lateThresholdSeconds = Math.floor(effectiveSeconds * 0.75);
-    const lateThreshold = `${Math.floor(lateThresholdSeconds / 60)}:${String(
-      lateThresholdSeconds % 60,
-    ).padStart(2, "0")}`;
-
-    const promptVariables = {
-      durationFormatted,
-      lateThreshold,
-      maxTimestampSeconds,
-      videoTitle: videoTitle || "Unknown",
-      channelName: channelName || "Unknown",
-      videoDescription: videoDescription || "No description available",
-      transcriptText,
-    };
-    const systemPrompt = await loadPromptSection(
-      "analysis.md",
-      "System prompt",
-      promptVariables,
-    );
-    const userPrompt = await loadPromptSection(
-      "analysis.md",
-      "User prompt",
-      promptVariables,
-    );
-
-    debugLog("[YouTube Digest] Requesting video analysis", settings.aiModel);
-    const { text: responseText } = await requestAiCompletion({
-      maxTokens: 8192,
-      responseFormat: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    });
-
-    // Parse the JSON, tolerating trailing commas / stray prose
-    let analysis = parseLooseJson(responseText);
-
-    // Treat every model response as untrusted data. Rebuild the supported
-    // schema and derive display timestamps from validated numeric seconds.
-    analysis = validateAndFixTimestamps(analysis, maxTimestampSeconds);
-
-    return {
-      success: true,
-      analysis: analysis,
-    };
-  } catch (error) {
-    console.error("Analysis error:", error);
-    if (error.status === 401) {
-      return {
-        success: false,
-        error: "INVALID_AI_KEY",
-        message: "DeepSeek rejected the API key.",
-      };
-    }
-    if (error.status === 429) {
-      return {
-        success: false,
-        error: "RATE_LIMITED",
-        message: "DeepSeek rate-limited this request. Try again shortly.",
-      };
-    }
-    return {
-      success: false,
-      error: error.message || "Failed to analyze transcript",
-    };
-  }
-}
-
-/**
- * Validates all timestamps in the analysis and fixes any that exceed video duration.
- * This is a safety net to prevent hallucinated timestamps from reaching the UI.
- *
- * @param {Object} analysis - The parsed analysis from DeepSeek
- * @param {number} maxSeconds - Maximum valid timestamp in seconds
- * @returns {Object} - Analysis with validated timestamps
- */
-function validateAndFixTimestamps(analysis, maxSeconds) {
-  const safeMax =
-    Number.isFinite(Number(maxSeconds)) && Number(maxSeconds) > 0
-      ? Number(maxSeconds)
-      : Number.MAX_SAFE_INTEGER;
-
-  // Helper to format seconds as MM:SS
-  const formatTimestamp = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${String(secs).padStart(2, "0")}`;
-  };
-
-  const safeString = (value, maxLength) =>
-    typeof value === "string" ? value.trim().slice(0, maxLength) : "";
-  const safeSeconds = (value) => {
-    const seconds = Number(value);
-    if (!Number.isFinite(seconds) || seconds < 0 || seconds > safeMax) {
-      return null;
-    }
-    return Math.floor(seconds);
-  };
-
-  const chapters = (Array.isArray(analysis?.chapters) ? analysis.chapters : [])
-    .slice(0, 100)
-    .map((chapter) => {
-      const seconds = safeSeconds(chapter?.timestampSeconds);
-      const title = safeString(chapter?.title, 300);
-      if (seconds === null || !title) return null;
-      return {
-        title,
-        summary: safeString(chapter?.summary, 1500),
-        timestampSeconds: seconds,
-        timestamp: formatTimestamp(seconds),
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.timestampSeconds - b.timestampSeconds);
-
-  const keyQuotes = (
-    Array.isArray(analysis?.keyQuotes) ? analysis.keyQuotes : []
-  )
-    .slice(0, 50)
-    .map((quote) => {
-      const seconds = safeSeconds(quote?.timestampSeconds);
-      const text = safeString(quote?.quote, 3000);
-      if (seconds === null || !text) return null;
-      return {
-        quote: text,
-        timestampSeconds: seconds,
-        timestamp: formatTimestamp(seconds),
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.timestampSeconds - b.timestampSeconds);
-
-  const keyMoments = (
-    Array.isArray(analysis?.keyMoments) ? analysis.keyMoments : []
-  )
-    .map(safeSeconds)
-    .filter((seconds) => seconds !== null)
-    .slice(0, 100);
-
-  return { chapters, keyQuotes, keyMoments };
-}
-
-// ============================================================
 // VIDEO INFO EXTRACTION
 // ============================================================
 
@@ -1134,341 +961,491 @@ async function handleGetVideoInfo(tabId) {
  * @returns {Object} - { success, explanation } or { success: false, error }
  */
 // ============================================================
-// NOTE MANAGEMENT
+// NOTEBOOK MANAGEMENT
 // ============================================================
+// The old per-quote note-card system (handleSaveNote/handleGetNotes/
+// handleDeleteNote/handleUpdateNote against the ytd_notes key) is gone.
+// Quote-capture mechanism returns in a later step; for now each video has a
+// single freeform notebook document instead.
+
+const NOTEBOOK_INDEX_KEY = "ytd_notebook_index";
+
+function notebookStorageKey(videoId) {
+  return `ytd_notebook_${videoId}`;
+}
 
 /**
- * Saves a note at a timestamp. Exact selected text is stored directly.
- * Other note requests find the relevant transcript line and clean it up.
+ * Reads a video's freeform notebook document.
+ * @returns {Object} - { success, notebook } where notebook is null if the
+ * user has never saved anything for this video, or { success: false, error }
  */
-async function handleSaveNote(
-  videoId,
-  timestamp,
-  videoTitle,
-  channelName,
-  selectedText,
-) {
+async function handleGetNotebook(videoId) {
   try {
-    const canonicalVideoUrl = YTD_SETTINGS.canonicalYouTubeUrl(videoId);
-    const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
-    const exactSelectedText =
-      typeof selectedText === "string"
-        ? selectedText.replace(/\s+/g, " ").trim().slice(0, 3000)
-        : "";
+    const key = notebookStorageKey(videoId);
+    const result = await chrome.storage.local.get(key);
+    return { success: true, notebook: result[key] || null };
+  } catch (error) {
+    return { success: false, error: error.message, code: error.code };
+  }
+}
 
-    // A selected transcript note is already the exact text the user wants.
-    // Save it directly without a transcript fetch or an AI cleanup request.
-    if (exactSelectedText) {
-      const minutes = Math.floor(safeTimestamp / 60);
-      const seconds = safeTimestamp % 60;
-      const note = {
-        id: `note_${Date.now()}`,
-        videoId,
-        videoTitle:
-          typeof videoTitle === "string"
-            ? videoTitle.slice(0, 500)
-            : "Untitled Video",
-        channelName:
-          typeof channelName === "string" ? channelName.slice(0, 300) : "",
-        timestamp: `${minutes}:${String(seconds).padStart(2, "0")}`,
-        timestampSeconds: safeTimestamp,
-        timestampedUrl: `${canonicalVideoUrl}&t=${safeTimestamp}s`,
-        text: exactSelectedText,
-        rawText: exactSelectedText,
-        userNote: "",
-        createdAt: Date.now(),
-      };
+/**
+ * Saves a video's freeform notebook document. Spreads the previous record
+ * first and overrides only the fields autosave actually changes, so any
+ * other field on the record (Drive sync state, or anything added later)
+ * survives automatically — this used to name each survivor explicitly
+ * (driveFileId, driveFileUrl, lastSyncedAt), which meant every new optional
+ * field had to be added to that list by hand or it silently got dropped on
+ * the next keystroke. That bug shape came up twice; spreading instead of
+ * naming closes it off for good.
+ */
+async function handleSaveNotebook(videoId, content, videoTitle, channelName) {
+  try {
+    const key = notebookStorageKey(videoId);
+    const existing = await chrome.storage.local.get(key);
+    const previous = existing[key] || null;
+    const now = Date.now();
 
-      await saveNoteToStorage(note);
-      chrome.runtime.sendMessage({ action: "noteSaved", note }).catch(() => {});
-      return { success: true, note };
-    }
-
-    // First, try to get the transcript from the digest cache. The side panel
-    // saves digests to chrome.storage.LOCAL — this used to look in
-    // storage.session (the wrong store), so it missed every time and
-    // refetched the transcript from Supadata on every saved note.
-    let transcript = null;
-    try {
-      const cached = await chrome.storage.local.get(`digest_${videoId}`);
-      if (cached[`digest_${videoId}`]?.transcript) {
-        transcript = cached[`digest_${videoId}`].transcript;
-        debugLog("[YouTube Digest] Using cached transcript for note");
-      }
-    } catch (e) {
-      debugLog("[YouTube Digest] No cached transcript, fetching...");
-    }
-
-    // If no cached transcript, fetch it
-    if (!transcript) {
-      const transcriptResult = await handleFetchTranscript(videoId);
-      if (!transcriptResult.success) {
-        return { success: false, error: "Could not fetch transcript" };
-      }
-      transcript = transcriptResult.transcript;
-    }
-
-    // Find the transcript line at the current timestamp
-    // Look for the line that contains this timestamp (or the closest one before)
-    let matchedLine = null;
-    let matchedIndex = 0;
-    let contextLines = [];
-    let beforeLine = null; // a few sentences before
-    let afterLine = null; // a few sentences after
-
-    for (let i = 0; i < transcript.length; i++) {
-      const line = transcript[i];
-      if (
-        line.start <= safeTimestamp &&
-        (!transcript[i + 1] || transcript[i + 1].start > safeTimestamp)
-      ) {
-        matchedLine = line;
-        matchedIndex = i;
-
-        // Build a buffer of 2 lines before and 4 lines after the target.
-        // This gives the model enough text to find a natural sentence boundary
-        // and complete a thought that spans multiple short caption chunks.
-        const beforeLines = [];
-        for (let j = 1; j <= 2 && i - j >= 0; j++) {
-          beforeLines.unshift(transcript[i - j].text);
-        }
-        if (beforeLines.length > 0) {
-          beforeLine = beforeLines.join(" ");
-        }
-
-        const afterLines = [];
-        for (let j = 1; j <= 4 && i + j < transcript.length; j++) {
-          afterLines.push(transcript[i + j].text);
-        }
-        if (afterLines.length > 0) {
-          afterLine = afterLines.join(" ");
-        }
-
-        // Get broader context (8 lines before and 12 lines after) for understanding
-        const startIdx = Math.max(0, i - 8);
-        const endIdx = Math.min(transcript.length - 1, i + 12);
-        for (let j = startIdx; j <= endIdx; j++) {
-          contextLines.push(transcript[j].text);
-        }
-        break;
-      }
-    }
-
-    if (!matchedLine) {
-      // Fallback: use the last line if timestamp is beyond transcript
-      matchedLine = transcript[transcript.length - 1];
-      matchedIndex = transcript.length - 1;
-
-      // Get buffer sentence (only before, since we're at the end)
-      const beforeLines = [];
-      for (let j = 1; j <= 2 && matchedIndex - j >= 0; j++) {
-        beforeLines.unshift(transcript[matchedIndex - j].text);
-      }
-      if (beforeLines.length > 0) {
-        beforeLine = beforeLines.join(" ");
-      }
-
-      const startIdx = Math.max(0, matchedIndex - 8);
-      for (let j = startIdx; j <= matchedIndex; j++) {
-        contextLines.push(transcript[j].text);
-      }
-    }
-
-    // Clean up the text with DeepSeek.
-    const cleanedText = await cleanupNoteText(
-      matchedLine.text,
-      beforeLine,
-      afterLine,
-      contextLines.join(" "),
-      videoTitle,
-    );
-
-    // Format timestamp as MM:SS
-    const minutes = Math.floor(safeTimestamp / 60);
-    const seconds = safeTimestamp % 60;
-    const formattedTimestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
-
-    // Create timestamped URL
-    const timestampedUrl = `${canonicalVideoUrl}&t=${safeTimestamp}s`;
-
-    // Create the note object
-    const note = {
-      id: `note_${Date.now()}`,
-      videoId: videoId,
+    const notebook = {
+      ...previous,
+      videoId,
       videoTitle:
         typeof videoTitle === "string"
           ? videoTitle.slice(0, 500)
-          : "Untitled Video",
+          : previous?.videoTitle || "",
       channelName:
-        typeof channelName === "string" ? channelName.slice(0, 300) : "",
-      timestamp: formattedTimestamp,
-      timestampSeconds: safeTimestamp,
-      timestampedUrl: timestampedUrl,
-      text: cleanedText,
-      rawText: matchedLine.text,
-      userNote: "",
-      createdAt: Date.now(),
+        typeof channelName === "string"
+          ? channelName.slice(0, 300)
+          : previous?.channelName || "",
+      content: typeof content === "string" ? content : "",
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
     };
 
-    // Save to storage
-    await saveNoteToStorage(note);
+    await chrome.storage.local.set({ [key]: notebook });
+    await updateNotebookIndex(notebook);
 
-    // Notify side panel to refresh notes list
-    chrome.runtime.sendMessage({ action: "noteSaved", note }).catch(() => {});
-
-    return { success: true, note };
+    return { success: true, notebook };
   } catch (error) {
-    console.error("[YouTube Digest] Save note error:", error);
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, code: error.code };
   }
 }
 
 /**
- * Cleans up transcript lines using DeepSeek.
- * Takes the target line plus buffer sentences (1 before, 1 after).
- * Uses JSON output to prevent any preambles from appearing.
+ * Replaces this video's entry in the notebook index (adding it if new).
+ * Pure so it can be unit tested without touching chrome.storage.
  */
-async function cleanupNoteText(
-  targetText,
-  beforeText,
-  afterText,
-  fullContext,
-  videoTitle,
-) {
-  const settings = await getSettings();
-  if (!settings.aiApiKey) {
-    return [beforeText, targetText, afterText].filter(Boolean).join(" ");
+function upsertNotebookIndexEntry(index, entry) {
+  const withoutExisting = (Array.isArray(index) ? index : []).filter(
+    (item) => item?.videoId !== entry.videoId,
+  );
+  withoutExisting.push(entry);
+  return withoutExisting;
+}
+
+/**
+ * Keeps ytd_notebook_index in sync so the side panel can list which videos
+ * have a notebook without loading every one of them.
+ */
+async function updateNotebookIndex(notebook) {
+  const result = await chrome.storage.local.get(NOTEBOOK_INDEX_KEY);
+  const updated = upsertNotebookIndexEntry(result[NOTEBOOK_INDEX_KEY], {
+    videoId: notebook.videoId,
+    title: notebook.videoTitle || "",
+    updatedAt: notebook.updatedAt,
+  });
+  await chrome.storage.local.set({ [NOTEBOOK_INDEX_KEY]: updated });
+}
+
+// ------------------------------------------------------------
+// Google Drive export ("Save to Drive")
+// ------------------------------------------------------------
+// Exports the same markdown the Download button produces, but to a Drive
+// file the extension owns (drive.file scope: only files this extension
+// creates, never broader Drive access). Uploaded as plain text/markdown —
+// never converted into a native Google Doc — so a later files.get?alt=media
+// reads back byte-identical content.
+
+const DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files";
+const DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files";
+// A single global default (not per-video). Applied to a first-time create
+// AND moves an already-exported file that's drifted from it — see
+// handleExportNotebookToDrive, buildDriveCreateMetadata, and
+// buildDriveMoveParams.
+const DRIVE_FOLDER_KEY = "ytd_drive_folder";
+// Every folder this extension has created via createDriveFolder, offered
+// again in the side panel's folder dropdown instead of re-creating one.
+const DRIVE_FOLDERS_KEY = "ytd_drive_folders";
+
+/**
+ * Maps a failed Drive API response to this codebase's .code convention.
+ * Shared by driveUploadFile and handleCreateDriveFolder so the two Drive
+ * write paths classify errors identically.
+ */
+function driveErrorCodeFor(status, reason) {
+  if (status === 401) return "DRIVE_AUTH_FAILED";
+  if (status === 403 && /rateLimitExceeded|quotaExceeded|storageQuotaExceeded/.test(reason)) {
+    return "DRIVE_QUOTA_EXCEEDED";
+  }
+  return "DRIVE_API_ERROR";
+}
+
+/**
+ * Wraps chrome.identity.getAuthToken's callback API in a Promise. Rejects
+ * (rather than resolving with no token) so callers can branch on failure.
+ */
+function getDriveAuthToken(interactive) {
+  return new Promise((resolve, reject) => {
+    chrome.identity.getAuthToken({ interactive }, (token) => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError || !token) {
+        reject(new Error(lastError?.message || "No Google Drive auth token"));
+        return;
+      }
+      resolve(token);
+    });
+  });
+}
+
+/**
+ * Gets a Drive auth token without prompting the user first — most exports
+ * happen with an already-granted, cached token. Only falls back to an
+ * interactive consent prompt if that fails, so we don't re-prompt on every
+ * export.
+ */
+async function getDriveAuthTokenPreferringCached() {
+  try {
+    return await getDriveAuthToken(false);
+  } catch (_error) {
+    return await getDriveAuthToken(true);
+  }
+}
+
+/**
+ * Fetches a file's current trashed state and parents directly from Drive —
+ * the source of truth, since the user may have trashed, deleted, or moved
+ * the file by hand outside this extension since the last export. Returns
+ * null for a 404 (file gone), the caller treats that the same as a file
+ * that's merely trashed: as if there were no existing file at all.
+ */
+async function driveGetFile(token, fileId) {
+  const response = await fetch(
+    `${DRIVE_FILES_URL}/${fileId}?fields=id,trashed,parents`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+
+  if (response.status === 404) return null;
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const reason = data.error?.errors?.[0]?.reason || "";
+    const error = new Error(
+      data.error?.message || `Google Drive error: ${response.status}`,
+    );
+    error.code = driveErrorCodeFor(response.status, reason);
+    throw error;
   }
 
+  return response.json();
+}
+
+/**
+ * Creates (fileId omitted) or overwrites (fileId given) a Drive file via
+ * multipart upload, so repeated exports update the same file instead of
+ * creating duplicates. Requests back only the fields the caller needs.
+ * `folderId` only applies to the create path (see buildDriveCreateMetadata).
+ * `moveParams` (addParents/removeParents from buildDriveMoveParams) only
+ * applies to the update path, moving the file in the same request that
+ * pushes the new content.
+ */
+async function driveUploadFile(token, { fileId, filename, mimeType, content, folderId, moveParams }) {
+  const boundary = `ytd_export_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const metadataObj = fileId
+    ? { name: filename, mimeType }
+    : YTD_NOTEBOOK_EXPORT.buildDriveCreateMetadata({ filename, mimeType, folderId });
+  const metadata = JSON.stringify(metadataObj);
+  const body =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${metadata}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: ${mimeType}\r\n\r\n` +
+    `${content}\r\n` +
+    `--${boundary}--`;
+
+  const url = new URL(fileId ? `${DRIVE_UPLOAD_URL}/${fileId}` : DRIVE_UPLOAD_URL);
+  url.searchParams.set("uploadType", "multipart");
+  url.searchParams.set("fields", "id,webViewLink");
+  if (fileId && moveParams) {
+    url.searchParams.set("addParents", moveParams.addParents);
+    if (moveParams.removeParents) url.searchParams.set("removeParents", moveParams.removeParents);
+  }
+
+  const response = await fetch(url.toString(), {
+    method: fileId ? "PATCH" : "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": `multipart/related; boundary=${boundary}`,
+    },
+    body,
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const reason = data.error?.errors?.[0]?.reason || "";
+    const error = new Error(
+      data.error?.message || `Google Drive error: ${response.status}`,
+    );
+    error.code = driveErrorCodeFor(response.status, reason);
+    throw error;
+  }
+
+  return response.json();
+}
+
+/**
+ * Exports a video's notebook to Google Drive as a plain-text .md file. This
+ * is a separate, user-initiated action from the typing-triggered autosave
+ * in handleSaveNotebook — it only ever touches driveFileId/driveFileUrl/
+ * driveFolderId/lastSyncedAt, never the notebook's content.
+ *
+ * Reversal from the original design: changing the default folder now DOES
+ * move an already-exported file on its next export, rather than leaving it
+ * in place. Real use showed "never move" was the wrong default — a
+ * re-export that silently kept writing into the old folder (or a trashed
+ * file) read as broken, not as a deliberate choice. This also trusts
+ * Drive's actual current parents (fetched fresh below) over whatever was
+ * last stored, since the user may have reorganized the file by hand.
+ */
+async function handleExportNotebookToDrive(videoId) {
   try {
-    debugLog("[YouTube Digest] Requesting note cleanup");
-    const variables = {
-      videoTitle: videoTitle || "Unknown",
-      fullContext,
-      beforeText: beforeText || "(none)",
-      targetText,
-      afterText: afterText || "(none)",
+    const key = notebookStorageKey(videoId);
+    const existing = await chrome.storage.local.get([key, DRIVE_FOLDER_KEY]);
+    const notebook = existing[key];
+    if (!notebook) {
+      const error = new Error("Write something in the notebook before saving to Drive.");
+      error.code = "NOTEBOOK_NOT_FOUND";
+      throw error;
+    }
+    const targetFolderId = existing[DRIVE_FOLDER_KEY]?.id || null;
+
+    const markdown = YTD_NOTEBOOK_EXPORT.buildNotebookExportMarkdown(notebook);
+    const filename = YTD_NOTEBOOK_EXPORT.buildExportFilename(notebook);
+
+    let token;
+    try {
+      token = await getDriveAuthTokenPreferringCached();
+    } catch (_authError) {
+      const error = new Error(
+        "Google Drive authorization failed. Please try again and approve access.",
+      );
+      error.code = "DRIVE_AUTH_FAILED";
+      throw error;
+    }
+
+    // Before trusting a stored driveFileId, confirm the file still exists
+    // and isn't trashed. A stale/deleted id is treated as if there were no
+    // existing file at all, falling through to a fresh create below.
+    let existingFile = null;
+    if (notebook.driveFileId) {
+      try {
+        existingFile = await driveGetFile(token, notebook.driveFileId);
+      } catch (getError) {
+        if (getError.code === "DRIVE_AUTH_FAILED") {
+          await new Promise((resolve) =>
+            chrome.identity.removeCachedAuthToken({ token }, resolve),
+          );
+        }
+        throw getError;
+      }
+      if (existingFile?.trashed) existingFile = null;
+    }
+
+    const fileId = existingFile ? notebook.driveFileId : null;
+    const moveParams = existingFile
+      ? YTD_NOTEBOOK_EXPORT.buildDriveMoveParams(existingFile.parents, targetFolderId)
+      : null;
+
+    let result;
+    try {
+      result = await driveUploadFile(token, {
+        fileId,
+        filename,
+        mimeType: "text/markdown",
+        content: markdown,
+        folderId: fileId ? undefined : targetFolderId,
+        moveParams,
+      });
+    } catch (uploadError) {
+      if (uploadError.code === "DRIVE_AUTH_FAILED") {
+        // A revoked/stale token surfaces here as a 401 rather than from
+        // getAuthToken itself. Drop it so the next export is forced to
+        // re-authenticate instead of failing silently forever.
+        await new Promise((resolve) =>
+          chrome.identity.removeCachedAuthToken({ token }, resolve),
+        );
+      }
+      throw uploadError;
+    }
+
+    // The folder this file now lives in: the target folder if this was a
+    // create or a move, otherwise whatever it already was (falling back to
+    // Drive's actual current parent for a notebook exported before
+    // driveFolderId existed).
+    let driveFolderId;
+    if (!existingFile || moveParams) {
+      driveFolderId = targetFolderId;
+    } else {
+      driveFolderId = notebook.driveFolderId ?? existingFile.parents?.[0] ?? null;
+    }
+
+    const lastSyncedAt = Date.now();
+    const updatedNotebook = {
+      ...notebook,
+      driveFileId: result.id,
+      driveFileUrl: result.webViewLink || null,
+      driveFolderId,
+      lastSyncedAt,
     };
-    const systemPrompt = await loadPromptSection(
-      "note-cleanup.md",
-      "System prompt",
-      variables,
-    );
-    const userPrompt = await loadPromptSection(
-      "note-cleanup.md",
-      "User prompt",
-      variables,
-    );
-    const { text: resultText } = await requestAiCompletion({
-      maxTokens: 512,
-      responseFormat: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
+    await chrome.storage.local.set({ [key]: updatedNotebook });
+
+    return {
+      success: true,
+      driveFileId: updatedNotebook.driveFileId,
+      driveFileUrl: updatedNotebook.driveFileUrl,
+      lastSyncedAt,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message,
+      code: error.code || "DRIVE_API_ERROR",
+    };
+  }
+}
+
+/**
+ * Reads the global default Drive export folder (not per-video), set via
+ * the side panel's folder dropdown.
+ */
+async function handleGetDriveFolder() {
+  try {
+    const result = await chrome.storage.local.get(DRIVE_FOLDER_KEY);
+    return { success: true, folder: result[DRIVE_FOLDER_KEY] || null };
+  } catch (error) {
+    return { success: false, error: error.message, code: error.code };
+  }
+}
+
+/**
+ * Persists the given folder as the new global default, or clears it back
+ * to "My Drive (root)" when passed a falsy folder. Takes effect on the next
+ * export of any notebook — a new file is created there, and an
+ * already-exported file gets moved there — see handleExportNotebookToDrive.
+ */
+async function handleSetDriveFolder(folder) {
+  try {
+    if (!folder) {
+      await chrome.storage.local.remove(DRIVE_FOLDER_KEY);
+      return { success: true, folder: null };
+    }
+    if (typeof folder.id !== "string" || !folder.id) {
+      const error = new Error("A Drive folder id is required.");
+      error.code = "DRIVE_FOLDER_INVALID";
+      throw error;
+    }
+    const stored = {
+      id: folder.id,
+      name: typeof folder.name === "string" ? folder.name : "",
+    };
+    await chrome.storage.local.set({ [DRIVE_FOLDER_KEY]: stored });
+    return { success: true, folder: stored };
+  } catch (error) {
+    return { success: false, error: error.message, code: error.code };
+  }
+}
+
+/**
+ * Creates a new folder in the user's Drive using the same authenticated
+ * access already used for file export — no Picker, no extra scope, just
+ * files.create with a folder mimeType. Records it in ytd_drive_folders so
+ * the side panel can offer it again without re-creating it.
+ */
+async function handleCreateDriveFolder(name) {
+  try {
+    const trimmedName = typeof name === "string" ? name.trim() : "";
+    if (!trimmedName) {
+      const error = new Error("A folder name is required.");
+      error.code = "DRIVE_FOLDER_INVALID";
+      throw error;
+    }
+
+    let token;
+    try {
+      token = await getDriveAuthTokenPreferringCached();
+    } catch (_authError) {
+      const error = new Error(
+        "Google Drive authorization failed. Please try again and approve access.",
+      );
+      error.code = "DRIVE_AUTH_FAILED";
+      throw error;
+    }
+
+    const metadata = YTD_NOTEBOOK_EXPORT.buildDriveFolderCreateMetadata(trimmedName);
+    const response = await fetch(`${DRIVE_FILES_URL}?fields=id,name`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(metadata),
     });
 
-    let result = resultText.trim() || targetText;
-
-    // Parse the JSON response (tolerating trailing commas / fences).
-    try {
-      const parsed = parseLooseJson(result);
-      if (typeof parsed.quote === "string" && parsed.quote.trim()) {
-        return parsed.quote.trim().slice(0, 3000);
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const reason = data.error?.errors?.[0]?.reason || "";
+      const error = new Error(
+        data.error?.message || `Google Drive error: ${response.status}`,
+      );
+      error.code = driveErrorCodeFor(response.status, reason);
+      if (error.code === "DRIVE_AUTH_FAILED") {
+        await new Promise((resolve) =>
+          chrome.identity.removeCachedAuthToken({ token }, resolve),
+        );
       }
-    } catch (parseError) {
-      console.warn(
-        "[YouTube Digest] JSON parse failed for note, stripping preambles:",
-        parseError,
-      );
-      result = result.replace(
-        /^(Here'?s?( the)?( cleaned)?( version)?:?\s*)/i,
-        "",
-      );
-      result = result.replace(
-        /^(The cleaned (quote|text|version)( is)?:?\s*)/i,
-        "",
-      );
-      result = result.replace(/^(I will.*?:?\s*)/i, "");
-      result = result.replace(/^(Cleaned:?\s*)/i, "");
-      result = result.replace(/^["']|["']$/g, "");
+      throw error;
     }
 
-    return result.slice(0, 3000);
-  } catch (e) {
-    console.error("[YouTube Digest] Cleanup error:", e);
-  }
+    const created = await response.json();
+    const folder = { id: created.id, name: created.name || trimmedName, createdAt: Date.now() };
 
-  // Return combined raw text if cleanup fails
-  return [beforeText, targetText, afterText].filter(Boolean).join(" ");
-}
+    const stored = await chrome.storage.local.get(DRIVE_FOLDERS_KEY);
+    const updatedList = YTD_NOTEBOOK_EXPORT.appendDriveFolderEntry(
+      stored[DRIVE_FOLDERS_KEY],
+      folder,
+    );
+    await chrome.storage.local.set({ [DRIVE_FOLDERS_KEY]: updatedList });
 
-/**
- * Saves a note to chrome.storage.local
- */
-async function saveNoteToStorage(note) {
-  const result = await chrome.storage.local.get("ytd_notes");
-  const notes = result.ytd_notes || [];
-  notes.unshift(note); // Add to beginning (newest first)
-
-  // Keep only last 500 notes to prevent storage bloat
-  if (notes.length > 500) {
-    notes.splice(500);
-  }
-
-  await chrome.storage.local.set({ ytd_notes: notes });
-}
-
-/**
- * Gets notes from storage, optionally filtered by video ID
- */
-async function handleGetNotes(videoId) {
-  try {
-    const result = await chrome.storage.local.get("ytd_notes");
-    let notes = result.ytd_notes || [];
-
-    if (videoId) {
-      notes = notes.filter((n) => n.videoId === videoId);
-    }
-
-    return { success: true, notes };
+    return { success: true, folder };
   } catch (error) {
-    return { success: false, error: error.message };
+    return {
+      success: false,
+      error: error.message,
+      code: error.code || "DRIVE_API_ERROR",
+    };
   }
 }
 
 /**
- * Deletes a note by ID
+ * Lists every folder this extension has created, for the side panel's
+ * folder dropdown.
  */
-async function handleDeleteNote(noteId) {
+async function handleListDriveFolders() {
   try {
-    const result = await chrome.storage.local.get("ytd_notes");
-    let notes = result.ytd_notes || [];
-    notes = notes.filter((n) => n.id !== noteId);
-    await chrome.storage.local.set({ ytd_notes: notes });
-    return { success: true };
+    const result = await chrome.storage.local.get(DRIVE_FOLDERS_KEY);
+    return { success: true, folders: result[DRIVE_FOLDERS_KEY] || [] };
   } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-/**
- * Updates a note's userNote field by ID.
- */
-async function handleUpdateNote(noteId, userNote) {
-  try {
-    const result = await chrome.storage.local.get("ytd_notes");
-    let notes = result.ytd_notes || [];
-    const note = notes.find((n) => n.id === noteId);
-    if (!note) {
-      return { success: false, error: "Note not found" };
-    }
-    note.userNote = typeof userNote === "string" ? userNote : "";
-    await chrome.storage.local.set({ ytd_notes: notes });
-    chrome.runtime.sendMessage({ action: "noteSaved", note }).catch(() => {});
-    return { success: true, note };
-  } catch (error) {
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, code: error.code };
   }
 }
 
@@ -1522,6 +1499,83 @@ async function handleExplainSelection(
       success: false,
       error: error.message || "Failed to explain selection",
     };
+  }
+}
+
+// ============================================================
+// CHAT — answers grounded in this video's transcript and notebook
+// ============================================================
+// Replaces the old analyzeTranscript chapters/key-quotes feature. Instead of
+// one-shot structured extraction, the user has an open-ended conversation;
+// there's no schema to validate or rebuild here, just a plain-text reply.
+
+function digestStorageKey(videoId) {
+  return `digest_${videoId}`;
+}
+
+/**
+ * Assembles the exact messages payload sent to requestAiCompletion for one
+ * chat turn. Pure — no DOM, no chrome.* calls — so it's testable with plain
+ * strings/arrays. Mirrors handleExplainSelection's system-role-plus-content
+ * shape: the transcript/notes context rides in a single system message,
+ * followed by the full conversation so far (already ending in the user's
+ * latest question).
+ *
+ * @param {string} systemContent - The resolved chat.md "System Context"
+ *   section, with {transcript}/{notes} already substituted.
+ * @param {Array<{role: string, content: string}>} messages - The full
+ *   conversation so far, including the user's latest question.
+ */
+function buildChatRequest(systemContent, messages) {
+  return {
+    maxTokens: 1024,
+    messages: [
+      { role: "system", content: systemContent },
+      ...(Array.isArray(messages) ? messages : []),
+    ],
+  };
+}
+
+/**
+ * Answers a chat question about a video using its cached transcript and the
+ * viewer's own notebook as grounding context.
+ *
+ * @param {string} videoId - The YouTube video ID.
+ * @param {Array<{role: string, content: string}>} messages - The full
+ *   conversation so far, including the user's latest question.
+ * @returns {Object} - { success, reply } or { success: false, error, code }
+ */
+async function handleChatWithTranscript(videoId, messages) {
+  try {
+    const settings = await getSettings();
+    if (!settings.aiApiKey) {
+      const error = new Error(
+        "DeepSeek API key not configured. Open YouTube Digest Settings.",
+      );
+      error.code = "NO_AI_KEY";
+      throw error;
+    }
+
+    const digestKey = digestStorageKey(videoId);
+    const notebookKey = notebookStorageKey(videoId);
+    const stored = await chrome.storage.local.get([digestKey, notebookKey]);
+    const transcript = stored[digestKey]?.transcriptTimestamped || "";
+    const notes = stored[notebookKey]?.content || "";
+
+    const systemContent = await loadPromptSection("chat.md", "System Context", {
+      transcript,
+      notes,
+    });
+
+    debugLog("[YouTube Digest] Requesting chat reply", settings.aiModel);
+    const { text } = await requestAiCompletion(
+      buildChatRequest(systemContent, messages),
+    );
+
+    return { success: true, reply: text.trim() };
+  } catch (error) {
+    console.error("Chat error:", error);
+    return { success: false, error: error.message, code: error.code };
   }
 }
 
@@ -1750,8 +1804,25 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   callAiTranslation,
   validateTranscriptBatchRequest,
   normalizeTranslatedSegmentBatch,
-  handleSaveNote,
   handleTranslateContent,
   closePanelForTab,
   updatePanelForTab,
+};
+
+globalThis.__YTD_NOTEBOOK_TESTING__ = {
+  handleGetNotebook,
+  handleSaveNotebook,
+  upsertNotebookIndexEntry,
+  handleExportNotebookToDrive,
+  driveUploadFile,
+  driveGetFile,
+  handleGetDriveFolder,
+  handleSetDriveFolder,
+  handleCreateDriveFolder,
+  handleListDriveFolders,
+};
+
+globalThis.__YTD_CHAT_TESTING__ = {
+  buildChatRequest,
+  handleChatWithTranscript,
 };

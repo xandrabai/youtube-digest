@@ -38,10 +38,7 @@ test("all timestamped transcript row clicks use the selection-aware seek helper"
 });
 
 test("the selection toolbar preserves selection and contains pointer events", () => {
-  assert.match(
-    source,
-    /class="explain-btn"[\s\S]*?>Explain<[\s\S]*class="selection-note-btn"[\s\S]*?>Note</,
-  );
+  assert.match(source, /class="explain-btn"[\s\S]*?>Explain</);
   assert.match(
     source,
     /tooltip\.addEventListener\("mousedown", \(event\) => \{[\s\S]*?event\.preventDefault\(\);\s+event\.stopPropagation\(\);/,
@@ -53,10 +50,6 @@ test("the selection toolbar preserves selection and contains pointer events", ()
   assert.match(
     source,
     /\.addEventListener\("click", async \(event\) => \{\s+event\.preventDefault\(\);\s+event\.stopPropagation\(\);/,
-  );
-  assert.match(
-    source,
-    /querySelector\("\.selection-note-btn"\)[\s\S]*action: "saveNote"[\s\S]*timestamp: selectedTimestamp[\s\S]*selectedText/,
   );
   assert.match(
     source,

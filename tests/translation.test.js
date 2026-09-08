@@ -245,8 +245,6 @@ test("the header exposes one universal language control for all result tabs", ()
   assert.match(js, /handleDisplayLanguageModeChange\(button\.dataset\.transcriptMode\)/);
   assert.match(js, /contentType: "transcriptBatch"/);
   assert.match(js, /contentType: "interfaceBatch"/);
-  assert.match(js, /translateOverviewContent/);
-  assert.match(js, /translateNotesContent/);
   assert.doesNotMatch(js, /English \+ Chinese/);
   assert.doesNotMatch(`${html}\n${js}`, /From video subtitles/);
 });
@@ -260,7 +258,7 @@ test("new videos default to Original while returning videos restore their choice
   assert.equal(await loadDisplayLanguageMode("unseen-video"), "original");
 });
 
-test("Overview shares the Transcript batch generation and retries when opened", () => {
+test("Transcript translation retries in shared batches without extra generation bumps", () => {
   const js = read("sidepanel.js");
   const transcriptFunction = js.match(
     /async function translateTranscript\(\)[\s\S]*?\n}\n\nfunction setTranslatingSpinner/,
@@ -273,17 +271,12 @@ test("Overview shares the Transcript batch generation and retries when opened", 
     js,
     /const batch = missing\.slice\(start, start \+ TRANSLATION_BATCH_SIZE\)[\s\S]*?rerender\(\);[\s\S]*?await updateCache\(\)/,
   );
+  // The Chat tab (data-tab="overview") replaced the old chapters/key-quotes
+  // analysis and has no translatable pre-rendered content of its own, so a
+  // language-mode switch only re-translates the Transcript tab.
   assert.match(
     js,
-    /tabName === "overview"[\s\S]*?currentAnalysis[\s\S]*?currentTranscriptMode !== "original"[\s\S]*?translateOverviewContent\(\)/,
-  );
-  assert.match(
-    js,
-    /Translate only the visible tab[\s\S]*?tabName === "notes"[\s\S]*?translateNotesContent\(\)/,
-  );
-  assert.match(
-    js,
-    /activeTabName === "overview"[\s\S]*?translateOverviewContent\(\)[\s\S]*?activeTabName === "notes"[\s\S]*?translateNotesContent\(\)[\s\S]*?activeTabName === "transcript"[\s\S]*?translateTranscript\(\)/,
+    /if \(activeTabName === "transcript"\) \{[\s\S]*?await translateTranscript\(\);/,
   );
 });
 
@@ -300,32 +293,8 @@ test("transcript reading position survives a side panel close", async () => {
   });
 });
 
-test("selected transcript notes keep exact text and row timestamp", async () => {
-  const providerMustNotRun = async () => {
-    throw new Error("Selected note must not call a provider");
-  };
-  const { handleSaveNote } = loadBackgroundHelpers({
-    fetchImpl: providerMustNotRun,
-  });
-
-  const result = await handleSaveNote(
-    "video123",
-    92.9,
-    "Test video",
-    "Test channel",
-    "  The selected words stay exact.  ",
-  );
-
-  assert.equal(result.success, true);
-  assert.equal(result.note.text, "The selected words stay exact.");
-  assert.equal(result.note.rawText, "The selected words stay exact.");
-  assert.equal(result.note.timestamp, "1:32");
-  assert.equal(result.note.timestampSeconds, 92);
-  assert.equal(
-    result.note.timestampedUrl,
-    "https://www.youtube.com/watch?v=video123&t=92s",
-  );
-});
+// The old per-quote note system (handleSaveNote) is gone in favor of one
+// freeform notebook document per video — see tests/notebook.test.js.
 
 test("semantic segmentation rebuilds sentences across caption boundaries", () => {
   const { groupTranscriptEntries } = loadSidepanelHelpers();
@@ -508,19 +477,18 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
 
   const backgroundSource = read("background.js");
   assert.equal(
-    (backgroundSource.match(/await requestAiCompletion\(\{/g) || []).length,
-    4,
+    (backgroundSource.match(/await requestAiCompletion\(/g) || []).length,
+    3,
   );
   assert.doesNotMatch(backgroundSource, /disableThinking/);
   for (const callPath of [
-    "handleAnalyzeTranscript",
-    "cleanupNoteText",
+    "handleChatWithTranscript",
     "handleExplainSelection",
     "callAiTranslation",
   ]) {
     assert.match(
       backgroundSource,
-      new RegExp(`async function ${callPath}\\([\\s\\S]*?requestAiCompletion\\(\\{`),
+      new RegExp(`async function ${callPath}\\([\\s\\S]*?requestAiCompletion\\(`),
     );
   }
 });

@@ -203,7 +203,7 @@ test("product UI contains no emoji or emoji-like pictographs", () => {
   assert.doesNotMatch(productUi, /&#(?:9655|9888);/);
 });
 
-test("selection actions use two equal edge-to-edge hover areas", () => {
+test("the selection toolbar's Explain action fills it edge-to-edge", () => {
   const css = read("sidepanel.css");
 
   assert.match(
@@ -212,7 +212,7 @@ test("selection actions use two equal edge-to-edge hover areas", () => {
   );
   assert.match(
     css,
-    /\.explain-btn,\s*\.selection-note-btn\s*\{[^}]*flex:\s*1 1 50%;[^}]*border-radius:\s*0;/,
+    /\.explain-btn\s*\{[^}]*flex:\s*1 1 auto;[^}]*border-radius:\s*0;/,
   );
   assert.match(
     css,
@@ -224,48 +224,53 @@ test("selection actions use two equal edge-to-edge hover areas", () => {
   );
 });
 
-test("note delete is an accessible SVG action at the end of the action row", () => {
-  const js = read("sidepanel.js");
-  const css = read("sidepanel.css");
-
-  assert.match(
-    js,
-    /<div class="note-actions">[\s\S]*class="[^"]*note-play[^"]*"[\s\S]*class="note-delete"[\s\S]*aria-label="Delete note"[\s\S]*<svg viewBox="0 0 24 24" aria-hidden="true">/,
-  );
-  assert.doesNotMatch(js, /class="note-delete"[^>]*>Delete<\/button>/);
-  assert.match(
-    css,
-    /\.note-delete\s*\{[^}]*place-items:\s*center;[^}]*margin-left:\s*auto;/,
-  );
-  assert.match(css, /\.note-delete:focus-visible\s*\{[^}]*outline:/);
-});
-
-test("notes filters preserve selected contrast and expose pressed state", () => {
+test("the notebook textarea is styled and themeable", () => {
   const html = read("sidepanel.html");
   const css = read("sidepanel.css");
-  const js = read("sidepanel.js");
 
   assert.match(
     html,
-    /id="notesFilterThis"[\s\S]*?aria-pressed="true"[\s\S]*?>[\s\S]*?This Video/,
+    /id="notebookTextarea"[\s\S]*class="notebook-text-layer notebook-textarea"/,
   );
+  assert.match(
+    css,
+    /\.notebook-textarea\s*\{[^}]*background:\s*transparent;[^}]*color:\s*transparent;[^}]*caret-color:\s*var\(--text\);/,
+  );
+  assert.match(
+    css,
+    /\.notebook-textarea:focus\s*\{[^}]*border-color:\s*var\(--accent\);/,
+  );
+});
+
+test("the notebook highlight backdrop shares text-layout rules with the textarea and stays non-interactive", () => {
+  const html = read("sidepanel.html");
+  const css = read("sidepanel.css");
+
   assert.match(
     html,
-    /id="notesFilterAll"[\s\S]*?aria-pressed="false"[\s\S]*?>[\s\S]*?All Notes/,
+    /id="notebookHighlightBackdrop"[\s\S]*class="notebook-text-layer notebook-highlight-backdrop"[\s\S]*aria-hidden="true"/,
+  );
+  // Every layout-affecting property lives once, in the shared class.
+  assert.match(
+    css,
+    /\.notebook-text-layer\s*\{[^}]*box-sizing:\s*border-box;[^}]*padding:\s*14px 16px;[^}]*border:\s*1px solid transparent;[^}]*font-family:\s*var\(--font-reading\);[^}]*font-size:\s*14px;[^}]*line-height:\s*1\.65;[^}]*white-space:\s*pre-wrap;[^}]*word-wrap:\s*break-word;[^}]*overflow-wrap:\s*break-word;/,
   );
   assert.match(
     css,
-    /\.notes-filter \.enhance-btn\.active:hover:not\(:disabled\)\s*\{[^}]*background:\s*var\(--accent-hover\);[^}]*color:\s*white;/,
+    /\.notebook-highlight-backdrop\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;[^}]*pointer-events:\s*none;/,
   );
   assert.match(
     css,
-    /\.notes-filter \.enhance-btn:hover:not\(:disabled\)\s*\{[^}]*background:\s*transparent;[^}]*color:\s*var\(--text-secondary\);/,
+    /\.notebook-textarea\s*\{[^}]*position:\s*relative;[^}]*z-index:\s*1;[^}]*resize:\s*none;/,
   );
-  assert.match(css, /\.notes-filter \.enhance-btn:focus-visible\s*\{[^}]*outline:/);
-  assert.match(js, /setNotesFilter\(false\)/);
-  assert.match(js, /setNotesFilter\(true\)/);
-  assert.match(js, /setAttribute\("aria-pressed", String\(!showAll\)\)/);
-  assert.match(js, /setAttribute\("aria-pressed", String\(showAll\)\)/);
+});
+
+test("quote lines render blue and their comment lines render muted", () => {
+  const css = read("sidepanel.css");
+
+  assert.match(css, /\.quote-line\s*\{[^}]*color:\s*var\(--link\);/);
+  assert.match(css, /\.quote-meta\s*\{[^}]*color:\s*var\(--text-muted\);/);
+  assert.match(css, /--link:\s*#[0-9a-fA-F]{3,6};/);
 });
 
 test("runtime has no source-file credential dependency or retired model", () => {
@@ -319,9 +324,8 @@ test("retired Remix and reader files are absent", () => {
 
 test("published prompt files contain runtime sections", () => {
   const expectedSections = {
-    "prompts/analysis.md": ["System prompt", "User prompt"],
+    "prompts/chat.md": ["System Context"],
     "prompts/explain.md": ["System prompt", "User prompt"],
-    "prompts/note-cleanup.md": ["System prompt", "User prompt"],
     "prompts/translation.md": [
       "Shared base rules",
       "Chinese rules",
